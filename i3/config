@@ -12,7 +12,8 @@ floating_modifier$mod
 
 # Custom commands
 # start a terminal
-bindsym $mod+t exec termit 
+# bindsym $mod+t exec termit 
+bindsym $mod+t exec urxvt 
 # start browser
 bindsym $mod+b exec chromium 
 # start filemanager
@@ -158,7 +159,7 @@ bindsym $mod+x mode "system"
 bar {
     position top
     #status_command i3status
-    status_command /home/lausek/Projects/i3status-rust/target/release/i3status-rs /home/lausek/Projects/i3status-rust/example_config.toml
+    status_command /home/lausek/.cargo/bin/i3status-rs /home/lausek/.config/i3status/rs.config
 
     colors {
         background #000000
