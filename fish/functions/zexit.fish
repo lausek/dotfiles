@@ -1,3 +1,3 @@
 function zexit
-    bash /home/lausek/Projects/opbox/test/nested.bash
+    bash /home/lausek/Scripts/sysctl
 end

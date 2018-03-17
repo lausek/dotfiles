@@ -27,7 +27,8 @@ mode "screenshot" {
 }
 
 # start dmenu (a program launcher)
-bindsym $mod+d exec "dmenu_run -nf '#BBBBBB' -nb '#222222' -sb '#DC5902' -sf '#EEEEEE' -fn 'monospace-10' -p 'dmenu >'"
+#bindsym $mod+d exec "dmenu_run -nf '#BBBBBB' -nb '#222222' -sb '#DC5902' -sf '#EEEEEE' -fn 'monospace-10' -p 'dmenu >'"
+bindsym $mod+d exec "rofi -show run"
 # There also is the (new) i3-dmenu-desktop which only displays applications
 # shipping a .desktop file. It is a wrapper around dmenu, so you need that
 # installed.
@@ -156,8 +157,8 @@ bindsym $mod+x mode "system"
 # finds out, if available)
 bar {
     position top
-    status_command i3status
-    #status_command /home/lausek/Projects/i3status-rust/target/release/i3status-rs /home/lausek/Projects/i3status-rust/example_config.toml
+    #status_command i3status
+    status_command /home/lausek/Projects/i3status-rust/target/release/i3status-rs /home/lausek/Projects/i3status-rust/example_config.toml
 
     colors {
         background #000000
