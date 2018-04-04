@@ -1,1 +1,3 @@
-feh --scale-down 
+feh --scale-down \
+    --sort mtime \
+    --image-bg black
