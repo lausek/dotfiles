@@ -17,6 +17,11 @@ set ai " auto indent
 set si " smart indent
 set wrap " wrap lines
 
+" buftabline
+set hidden
+nnoremap <C-N> :bnext<CR> 
+nnoremap <C-P> :bprev<CR> 
+
 color material-monokai 
 
 call plug#begin('~/.config/nvim/plugins/')
@@ -24,8 +29,10 @@ call plug#begin('~/.config/nvim/plugins/')
 Plug 'scrooloose/nerdtree'
 Plug 'xuyuanp/nerdtree-git-plugin'
 Plug 'roxma/nvim-completion-manager'
+Plug 'valloric/youcompleteme'
 Plug 'tpope/vim-surround'
 Plug 'itchyny/lightline.vim'
+Plug 'ap/vim-buftabline'
 
 " rust
 Plug 'rust-lang/rust.vim'
