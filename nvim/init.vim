@@ -38,6 +38,7 @@ Plug 'ap/vim-buftabline'
 Plug 'rust-lang/rust.vim'
 Plug 'racer-rust/vim-racer'
 Plug 'roxma/nvim-cm-racer'
+Plug 'racer-rust/racer'
 
 call plug#end()
 

@@ -186,3 +186,8 @@ client.placeholder      #000000 #0C0C0C #FFFFFF #000000   #0C0C0C
 client.background       #FFFFFF
 
 new_window 1pixel
+
+exec /usr/share/scripts/setup-monitors.sh
+
+# set background
+exec --no-startup-id feh --bg-max ~/Bilder/debian-card-black-demo.png
