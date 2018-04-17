@@ -1,0 +1,34 @@
+#!/bin/bash
+
+SPEAKERS="output:hdmi-stereo-extra1"
+HEADPHONES="output:analog-stereo+input:analog-mono"
+
+function list-active {
+    active=$(pacmd list-sinks | grep alsa.name | awk -F\" '/USB|HDMI/ {print $2}')
+    
+    if [[ "$active" =~ "USB" ]]; then
+        printf "\uf025"
+    #else
+    #    printf "\uf028"
+    fi
+}
+
+declare -a cards=($(pacmd list-cards | awk -F: '$1 ~ /index/ {print $2}'))
+len=${#cards[@]}
+
+if [ $len -gt 1 ]; then
+    if [ "$1" == "on" ]; then
+        pacmd set-card-profile "${cards[0]}" "off" 
+        pacmd set-card-profile "${cards[1]}" "$HEADPHONES"
+
+    elif [ "$1" == "off" ]; then
+        pacmd set-card-profile "${cards[1]}" "off" 
+        pacmd set-card-profile "${cards[0]}" "$SPEAKERS"
+
+    else
+        list-active
+
+    fi
+else
+    list-active
+fi

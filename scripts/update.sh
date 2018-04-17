@@ -1,0 +1,7 @@
+#!/bin/sh
+apt-get -y update
+apt-get -y autoremove
+apt-get -y upgrade --allow-unauthenticated
+apt-get dist-upgrade
+
+# TODO: add rustup if exists
