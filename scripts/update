@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 apt-get -y update
 apt-get -y autoremove
 apt-get -y upgrade --allow-unauthenticated
