@@ -3,7 +3,7 @@ cat /proc/acpi/button/lid/LID/state | grep closed &>/dev/null
 
 # check if grep on closed monitor display was successful. if yes, adjust to multi screen setup
 if [[ "$?" == "0" ]]; then
-	xrandr --output HDMI-2 --auto --primary --output VGA-1 --auto --right-of HDMI-2 --output LVDS-1 --off
+    xrandr --output HDMI-2 --auto --primary --output VGA-1 --auto --right-of HDMI-2 --output LVDS-1 --off
 else
     xrandr --output LVDS-1 --auto --primary
 fi

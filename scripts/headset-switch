@@ -7,7 +7,8 @@ function list-active {
     active=$(pacmd list-sinks | grep alsa.name | awk -F\" '/USB|HDMI/ {print $2}')
     
     if [[ "$active" =~ "USB" ]]; then
-        printf "\uf025"
+        echo "0"
+        exit 0
     #else
     #    printf "\uf028"
     fi
@@ -20,10 +21,14 @@ if [ $len -gt 1 ]; then
     if [ "$1" == "on" ]; then
         pacmd set-card-profile "${cards[0]}" "off" 
         pacmd set-card-profile "${cards[1]}" "$HEADPHONES"
+        echo "1"
+        exit 0
 
     elif [ "$1" == "off" ]; then
         pacmd set-card-profile "${cards[1]}" "off" 
         pacmd set-card-profile "${cards[0]}" "$SPEAKERS"
+        echo "1"
+        exit 0
 
     else
         list-active
@@ -32,3 +37,5 @@ if [ $len -gt 1 ]; then
 else
     list-active
 fi
+
+exit 1
