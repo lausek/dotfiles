@@ -5,18 +5,22 @@ LEN=${#LANGS[@]}
 
 current=$(setxkbmap -print -verbose 10 | awk '$1 == "layout:" {print $2}')
 
-for i in "${!LANGS[@]}"; do
-    lang=${LANGS[$i]}
+if [[ "$1" = "toggle" ]]; then 
+    for i in "${!LANGS[@]}"; do
+        lang=${LANGS[$i]}
 
-    if [[ $lang = $current ]]; then
-        if [ "$((i + 1))" -lt "$LEN" ]; then
-            lang=${LANGS[$((i + 1))]}
-        else
-            lang=${LANGS[0]}
+        if [[ $lang = $current ]]; then
+            if [ "$((i + 1))" -lt "$LEN" ]; then
+                lang=${LANGS[$((i + 1))]}
+            else
+                lang=${LANGS[0]}
+            fi
+            setxkbmap $lang
+            break
         fi
-        setxkbmap $lang
-        break
-    fi
-done
+    done
+else
+    lang=$current
+fi
 
 printf "\uF11c  ${lang^^}"
