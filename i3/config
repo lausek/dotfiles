@@ -181,4 +181,4 @@ new_window 1pixel
 exec /usr/share/scripts/setup-monitors.sh
 
 # set background
-exec --no-startup-id feh --bg-max ~/Bilder/debian-card-black-demo.png
+exec --no-startup-id feh --bg-max ~/Bilder/wallpaper.jpg
