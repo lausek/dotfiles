@@ -23,6 +23,8 @@ bindsym $mod+e exec pcmanfm
 bindsym $mod+Shift+q kill
 # take a screenshot 
 bindsym --release Print exec "i3-msg 'mode screenshot'; mkdir -p ~/Screenshots; scrot -s ~/Screenshots/%Y%m%d-%H%M%S_screenshot.png; i3-msg 'mode default'"
+# lock screen
+bindsym $mod+l exec i3lock -c 000000 && i3-msg "mode default"
 
 mode "screenshot" {
     bindsym Escape mode "default" 
