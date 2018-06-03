@@ -9,8 +9,6 @@ function list-active {
     if [[ "$active" =~ "USB" ]]; then
         echo "0"
         exit 0
-    #else
-    #    printf "\uf028"
     fi
 }
 
