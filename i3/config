@@ -14,9 +14,9 @@ floating_modifier$mod
 # start a terminal
 bindsym $mod+t exec urxvt 
 # start browser
-bindsym $mod+b exec vivaldi-stable 
+bindsym $mod+b exec chromium
 # start special browser
-bindsym $mod+n exec vivaldi-stable --incognito --temp-profile 
+bindsym $mod+n exec chormium --incognito --temp-profile 
 # start filemanager
 bindsym $mod+e exec pcmanfm 
 # kill focused window
@@ -155,6 +155,7 @@ bar {
     position top
     #status_command i3status
     status_command /home/lausek/.cargo/bin/i3status-rs /home/lausek/.config/i3status/rs.config
+    #status_command ~/Projects/i3status-rust/target/release/i3status-rs ~/Projects/i3status-rust/example_config.toml
 
     colors {
         background #000000
