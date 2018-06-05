@@ -16,7 +16,7 @@ bindsym $mod+t exec urxvt
 # start browser
 bindsym $mod+b exec chromium
 # start special browser
-bindsym $mod+n exec chormium --incognito --temp-profile 
+bindsym $mod+n exec chromium --incognito --temp-profile 
 # start filemanager
 bindsym $mod+e exec pcmanfm 
 # kill focused window
