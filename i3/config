@@ -19,6 +19,8 @@ bindsym $mod+b exec chromium
 bindsym $mod+n exec chromium --incognito --temp-profile 
 # start filemanager
 bindsym $mod+e exec pcmanfm 
+# start keepass
+bindsym $mod+k exec keepass2
 # kill focused window
 bindsym $mod+Shift+q kill
 # take a screenshot 
@@ -181,7 +183,7 @@ client.background       #FFFFFF
 
 new_window 1pixel
 
-exec /usr/share/scripts/setup-monitors.sh
+exec /usr/share/scripts/setup-env
 
 # set background
 exec --no-startup-id feh --bg-max ~/Bilder/wallpaper.jpg
