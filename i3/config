@@ -14,9 +14,9 @@ floating_modifier$mod
 # start a terminal
 bindsym $mod+t exec urxvt 
 # start browser
-bindsym $mod+b exec chromium
+bindsym $mod+b exec firefox
 # start special browser
-bindsym $mod+n exec chromium --incognito --temp-profile 
+bindsym $mod+n exec firefox --private-window 
 # start filemanager
 bindsym $mod+e exec pcmanfm 
 # start keepass
