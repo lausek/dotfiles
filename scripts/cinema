@@ -1,5 +1,12 @@
 #!/bin/bash
+# disable automatic turn-off
 xset s off
 xset s noblank
 xset -dpms 
+
+# change to correct directory
+cd $(dirname "${BASH_SOURCE[0]}")
 ./brightness 40
+
+# shutdown in 2 hours
+sudo shutdown -P +120
