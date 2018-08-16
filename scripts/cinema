@@ -8,5 +8,10 @@ xset -dpms
 cd $(dirname "${BASH_SOURCE[0]}")
 ./brightness 40
 
-# shutdown in 2 hours
-sudo shutdown -P +120
+if [[ "$1" == "--stay" ]]; then
+    echo "no shutdown set"
+else
+    # shutdown in 2 hours
+    sudo shutdown -P +120
+    echo "shutdown in 2 hours"
+fi
