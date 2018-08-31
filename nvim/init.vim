@@ -82,6 +82,9 @@ noremap <leader>ss :call StripWhitespace()<CR>
 " format whole code
 noremap <leader>f gg=G
 
+" make
+noremap <leader>m :make<CR>
+
 " avoid mistyping commands
 command! W w
 command! Wq wq
