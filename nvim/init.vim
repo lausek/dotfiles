@@ -9,6 +9,7 @@ Plug 'valloric/youcompleteme'
 Plug 'tpope/vim-surround'
 Plug 'itchyny/lightline.vim'
 Plug 'ap/vim-buftabline'
+Plug 'jiangmiao/auto-pairs'
 
 " rust
 Plug 'rust-lang/rust.vim'
