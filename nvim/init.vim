@@ -2,6 +2,8 @@ set nocompatible
 
 call plug#begin('~/.config/nvim/plugins/')
 
+Plug 'witling/quasi.vim'
+
 Plug 'scrooloose/nerdtree'
 Plug 'xuyuanp/nerdtree-git-plugin'
 Plug 'roxma/nvim-completion-manager'
@@ -10,6 +12,7 @@ Plug 'tpope/vim-surround'
 Plug 'itchyny/lightline.vim'
 Plug 'ap/vim-buftabline'
 Plug 'jiangmiao/auto-pairs'
+Plug 'junegunn/fzf'
 
 " rust
 Plug 'rust-lang/rust.vim'
@@ -86,11 +89,16 @@ noremap <leader>f gg=G
 " make
 noremap <leader>m :make<CR>
 
+" use fuzzy find
+noremap <leader>s :FZF<CR>
+
 " avoid mistyping commands
 command! W w
 command! Wq wq
 command! Wqa wqa
 
 " --- plugin config ---
+let g:ycm_confirm_extra_conf = 0
+
 let NERDTreeMinimalUI=1
 autocmd vimenter * NERDTree
