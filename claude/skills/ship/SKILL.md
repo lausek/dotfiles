@@ -10,10 +10,7 @@ argument-hint: "[task]"
 
 ## 1. Prepare the branch
 
-With a task argument:
-- If the task references a ticket, fetch it the way the `fix-ticket` skill does.
-- Create a branch from the up-to-date base branch, named `<type>/<ticket>-<slug>`, e.g. `feat/1234-date-parsing`. Without a ticket: `<type>/<slug>`.
-- Implement the task and commit it.
+With a task argument, implement it following the git workflow from your global instructions (fresh base, worktree, `<type>/<summary>` branch, ticket read first), then commit it.
 
 Without a task argument, ship the current branch as it is:
 - If there are uncommitted changes, ask the user whether to commit them. Don't commit on your own.
@@ -22,12 +19,14 @@ Without a task argument, ship the current branch as it is:
 ## 2. Run git-ship
 
 ```bash
-git ship -y
+git ship -y [--ticket <n>]
 ```
+
+Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work item. git-ship gives it to the reviewer, which then also checks the change against it, and links it to the PR so merging closes it.
 
 - Always run it with `run_in_background: true`. Waiting for CI can take up to an hour. You get notified when it exits, don't poll.
 - Don't review or fix the change yourself, before or after. git-ship validates in sessions that didn't write the code, that's the point.
-- If `git-ship` is not installed, tell the user to run `uv tool install -e ~/dev/lausek/dotfiles/git-ship`.
+- If `git-ship` is not installed, tell the user to run `install` from their dotfiles repo.
 
 ## 3. Act on the exit code
 
@@ -37,8 +36,8 @@ git ship -y
 - the commits git-ship added. If it added any, run `git pull --ff-only` on the branch so the local branch has them.
 
 **2 - needs a human decision.** The review found `[ask-user]` findings and stopped. Show the user these findings, then use AskUserQuestion:
-- "Fix them" -> rerun `git ship -y --fix-asks` in the background
-- "Keep them as they are" -> rerun `git ship -y --keep-asks` in the background
+- "Fix them" -> rerun with `--fix-asks` added, in the background
+- "Keep them as they are" -> rerun with `--keep-asks` added, in the background
 
 The rerun reviews again from scratch. If it stops with exit 2 once more, ask again. Never pick an option for the user.
 

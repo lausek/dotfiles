@@ -4,14 +4,18 @@ import tempfile
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
-from .models import Check, CheckState, PullRequest
+from .models import Check, CheckState, PullRequest, Ticket
 from .shell import ShipError, run
 
 
 class Host(Protocol):
+    def fetch_ticket(self, ticket_id: str) -> Ticket: ...
+
     def find_open_pr(self, branch: str) -> str | None: ...
 
-    def create_pr(self, branch: str, base: str, pr: PullRequest) -> str: ...
+    def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
+        """Links the ticket so merging the PR closes it."""
+        ...
 
     def checks(self, branch: str, head: str) -> list[Check]:
         """CI checks of the branch's PR. Checks that ran on another commit than `head` are pending."""
@@ -24,12 +28,17 @@ class GitHub:
     def __init__(self, cwd: Path):
         self.cwd = cwd
 
+    def fetch_ticket(self, ticket_id: str) -> Ticket:
+        issue = json.loads(self._gh("issue", "view", ticket_id, "--json", "title,body"))
+        return Ticket(id=ticket_id, title=issue["title"], description=issue["body"])
+
     def find_open_pr(self, branch: str) -> str | None:
         url = self._gh("pr", "list", "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url")
         return url or None
 
-    def create_pr(self, branch: str, base: str, pr: PullRequest) -> str:
-        return self._gh("pr", "create", "--head", branch, "--base", base, "--title", pr.title, "--body", pr.body)
+    def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
+        body = f"{pr.body}\n\nCloses #{ticket.id}" if ticket else pr.body
+        return self._gh("pr", "create", "--head", branch, "--base", base, "--title", pr.title, "--body", body)
 
     def checks(self, branch: str, head: str) -> list[Check]:
         pr = json.loads(self._gh("pr", "view", branch, "--json", "headRefOid,statusCheckRollup"))
@@ -73,13 +82,29 @@ class AzureDevOps:
     def __init__(self, cwd: Path):
         self.cwd = cwd
 
+    def fetch_ticket(self, ticket_id: str) -> Ticket:
+        item = json.loads(self._az(
+            "boards", "work-item", "show", "--id", ticket_id, "-o", "json",
+            "--query", "{title: fields.\"System.Title\", description: fields.\"System.Description\", "
+                       "criteria: fields.\"Microsoft.VSTS.Common.AcceptanceCriteria\", "
+                       "repro: fields.\"Microsoft.VSTS.TCM.ReproSteps\"}",
+        ))
+        sections = [
+            ("Description", item["description"]),
+            ("Acceptance criteria", item["criteria"]),
+            ("Repro steps", item["repro"]),
+        ]
+        description = "\n\n".join(f"{name}:\n{text}" for name, text in sections if text)
+        return Ticket(id=ticket_id, title=item["title"], description=description)
+
     def find_open_pr(self, branch: str) -> str | None:
         pr = self._find_pr(branch)
         return self._web_url(pr["id"]) if pr else None
 
-    def create_pr(self, branch: str, base: str, pr: PullRequest) -> str:
+    def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
+        link = ["--work-items", ticket.id, "--transition-work-items", "true"] if ticket else []
         pr_id = self._az("repos", "pr", "create", "--source-branch", branch, "--target-branch", base,
-                         "--title", pr.title, "--description", pr.body, "--query", "pullRequestId", "-o", "tsv")
+                         "--title", pr.title, "--description", pr.body, *link, "--query", "pullRequestId", "-o", "tsv")
         return self._web_url(int(pr_id))
 
     def checks(self, branch: str, head: str) -> list[Check]:

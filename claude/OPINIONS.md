@@ -34,8 +34,7 @@
 
 ## Process
 
-- Put the ticket number - if available - PR titles using conventional branch naming convention e.g. "feat(1234): ..."
-- If no ticket number is given, use the product that is being changed e.g. "fix(intelligence): ..."
+- PR titles are conventional commits that describe the effect. The scope is the product in a monorepo (e.g. "fix(intelligence): ..."), none in single-product repos. The ticket is linked through the host, not put in the title.
 - Pragmatism over perfection: as long as it works, it's fine. Raise the bar for new code.
 - Reviews are for teaching. Ask why instead of dictating, and link a good reference.
 

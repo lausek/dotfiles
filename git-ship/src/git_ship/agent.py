@@ -94,6 +94,13 @@ Then assess how carefully a human has to review this change before merging:
 - 'medium': touches behavior that matters, safe to merge once the risky parts were checked.
 - 'high': fundamental, risky or ambiguous. Must not be merged without an in-depth review.
 risk_rationale is one sentence explaining the level and where a reviewer should look."""
+        if change.ticket:
+            prompt += f"""
+
+The change implements this ticket. If it misses or contradicts what the ticket asks for,
+report that as an 'ask-user' finding.
+
+{change.ticket}"""
         if kept:
             prompt += "\n\nThe author decided to keep these as they are, don't report them again:\n"
             prompt += _bullets(kept)
@@ -118,8 +125,10 @@ risk_rationale is one sentence explaining the level and where a reviewer should 
 
     def write_pr(self, change: Change, fixes: Sequence[str], checks: Sequence[str]) -> PullRequest:
         prompt = f"""Write a pull request for `git diff {change.diff_range}`, for a reviewer who wasn't there.
-Title: conventional commit style. Scope is the ticket number '{change.ticket or ""}' if set,
-otherwise the product or area that changed, e.g. 'feat(1234): ...' or 'fix(api): ...'.
+Title: a conventional commit describing the effect in plain lowercase words. The scope is the product
+that changed in a monorepo, e.g. 'fix(dpt): ...', and left out in a single-product repo, e.g. 'feat: ...'.
+No ticket numbers in the title.
+{f"The change implements this ticket:{chr(10)}{change.ticket}" if change.ticket else ""}
 Body (markdown): what changed and why, how it was verified, risks.
 No attribution, signature or "Generated with" footer.
 Fixes applied by the validation pipeline:

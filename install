@@ -24,6 +24,8 @@ link() {
 
 # claude
 link claude/AGENTS.md ~/.claude/CLAUDE.md
+link claude/OPINIONS.md ~/.claude/OPINIONS.md
+link claude/VOICE.md ~/.claude/VOICE.md
 for skill in "$dotfiles"/claude/skills/*/; do
     name=$(basename "$skill")
     link "claude/skills/$name" ~/.claude/skills/"$name"

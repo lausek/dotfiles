@@ -1,8 +1,8 @@
 # dotfiles
 
 ```sh
-git clone git@github.com:lausek/dotfiles.git ~/dev/lausek/dotfiles
-~/dev/lausek/dotfiles/install
+git clone git@github.com:lausek/dotfiles.git
+dotfiles/install
 ```
 
 `install` links the configs into place and installs the tools (needs [uv](https://docs.astral.sh/uv/)).

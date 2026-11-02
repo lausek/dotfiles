@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision, ticket_from_branch
+from git_ship.cli import needs_decision
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
 from git_ship.models import (
@@ -16,6 +16,7 @@ from git_ship.models import (
     Finding,
     PullRequest,
     Review,
+    Ticket,
 )
 from git_ship.pipeline import (
     Clock,
@@ -65,10 +66,13 @@ class FakeHost:
     def __init__(self, polls: list[list[Check]]):
         self.polls = polls
 
+    def fetch_ticket(self, ticket_id: str) -> Ticket:
+        return Ticket(id=ticket_id, title="t", description="d")
+
     def find_open_pr(self, branch: str) -> str | None:
         return None
 
-    def create_pr(self, branch: str, base: str, pr: PullRequest) -> str:
+    def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
         return "url"
 
     def checks(self, branch: str, head: str) -> list[Check]:
@@ -256,10 +260,6 @@ class HelpersTest(unittest.TestCase):
         pr = with_assessment(PullRequest("t", "body"), Assessment("high", "rewrites auth.", [DECISION]))
         self.assertTrue(pr.body.startswith("> 🚨 **High risk** - needs an in-depth review before merging. rewrites auth."))
         self.assertTrue(pr.body.endswith("- m.py:5 - should this raise?"))
-
-    def test_ticket_from_branch(self):
-        self.assertEqual(ticket_from_branch("feat/1234-avg"), "1234")
-        self.assertIsNone(ticket_from_branch("fix/v2-typo"))
 
     def test_detect_host(self):
         cwd = Path(".")

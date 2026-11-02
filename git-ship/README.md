@@ -16,9 +16,7 @@ review -> fix -> checks -> fix -> push -> PR -> CI -> fix
 
 ## Install
 
-```sh
-uv tool install -e ~/dev/lausek/dotfiles/git-ship
-```
+The dotfiles' `install` script installs it (`uv tool install -e`).
 
 ## Usage
 
@@ -27,7 +25,11 @@ git ship                # asks about findings that need a human decision
 git ship -y             # never asks, exits with 2 on those instead
 git ship -y --fix-asks  # fix them too
 git ship -y --keep-asks # keep them as they are, they are listed in the PR
+git ship --ticket 1234  # the change implements this issue / work item
 ```
+
+`--ticket` hands the GitHub issue or Azure DevOps work item to the reviewer, which then also checks the
+change against it, and links it to the PR so merging closes it.
 
 Exit codes: `0` shipped, `1` failed, `2` needs a human decision. The `/ship` Claude Code skill
 (`claude/skills/ship`) drives git-ship with these and asks you about the decisions.

@@ -54,8 +54,18 @@ class Detection:
 
 
 @dataclass(frozen=True)
+class Ticket:
+    id: str
+    title: str
+    description: str
+
+    def __str__(self) -> str:
+        return f"#{self.id} {self.title}\n\n{self.description}"
+
+
+@dataclass(frozen=True)
 class Change:
     """What is being shipped, as the agents need to know it."""
 
     diff_range: str
-    ticket: str | None
+    ticket: Ticket | None

@@ -7,7 +7,6 @@ On the first run, claude detects the local checks (install, lint, tests) and sav
 """
 
 import argparse
-import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,7 +17,7 @@ from .checks import Approve, resolve_checks
 from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
 from .hosts import Host, detect_host
-from .models import Assessment, Change, Finding
+from .models import Assessment, Change, Finding, Ticket
 from .pipeline import (
     Decide,
     Decision,
@@ -44,12 +43,13 @@ def main() -> int:
     asks = parser.add_mutually_exclusive_group()
     asks.add_argument("--fix-asks", action="store_true", help="fix findings that need a human decision too")
     asks.add_argument("--keep-asks", action="store_true", help="keep findings that need a human decision as they are")
+    parser.add_argument("--ticket", type=_ticket_id, help="GitHub issue or Azure DevOps work item the change implements")
     parser.add_argument("--setup", action="store_true", help="detect the checks again")
     args = parser.parse_args()
 
     try:
         with stay_awake():
-            ship(decide=_decider(args), approve=accept if args.yes else confirm, redetect=args.setup)
+            ship(decide=_decider(args), approve=accept if args.yes else confirm, redetect=args.setup, ticket_id=args.ticket)
     except NeedsDecision as error:
         print(f"ship: {error}", file=sys.stderr)
         return 2
@@ -71,7 +71,7 @@ def _decider(args: argparse.Namespace) -> Decide:
     return prompt_decision
 
 
-def ship(decide: Decide, approve: Approve, redetect: bool) -> None:
+def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
     repo = Git(Path(run("git", "rev-parse", "--show-toplevel")))
     config_file = config_path(repo)
     config = load_config(repo, read_config_file(config_file))
@@ -84,7 +84,7 @@ def ship(decide: Decide, approve: Approve, redetect: bool) -> None:
     if not repo("rev-list", f"{merge_base}..HEAD"):
         raise ShipError(f"no commits ahead of origin/{config.base}")
 
-    change = Change(diff_range=f"{merge_base}..HEAD", ticket=ticket_from_branch(branch))
+    change = Change(diff_range=f"{merge_base}..HEAD", ticket=_fetch_ticket(host, ticket_id))
 
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
@@ -118,12 +118,22 @@ def open_pr(
         return
 
     pr = validation.agent.write_pr(validation.change, fixes, checks)
-    print(host.create_pr(branch, base, with_assessment(pr, assessment)))
+    print(host.create_pr(branch, base, with_assessment(pr, assessment), validation.change.ticket))
 
 
-def ticket_from_branch(branch: str) -> str | None:
-    match = re.search(r"\d{3,}", branch)
-    return match.group() if match else None
+def _ticket_id(value: str) -> str:
+    ticket_id = value.removeprefix("#")
+    if not ticket_id.isdigit():
+        raise argparse.ArgumentTypeError(f"expected a ticket number like 1234 or #1234, got '{value}'")
+    return ticket_id
+
+
+def _fetch_ticket(host: Host | None, ticket_id: str | None) -> Ticket | None:
+    if ticket_id is None:
+        return None
+    if host is None:
+        raise ShipError("--ticket needs a GitHub or Azure DevOps remote")
+    return host.fetch_ticket(ticket_id)
 
 
 def confirm(question: str) -> bool:
