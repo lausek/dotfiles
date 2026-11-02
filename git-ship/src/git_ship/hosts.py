@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
 from .models import Check, CheckState, PullRequest, Ticket
+from .report import fit
 from .shell import ShipError, run
 
 
@@ -25,6 +26,8 @@ class Host(Protocol):
 
 
 class GitHub:
+    MAX_BODY = 65536
+
     def __init__(self, cwd: Path):
         self.cwd = cwd
 
@@ -37,7 +40,8 @@ class GitHub:
         return url or None
 
     def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
-        body = f"{pr.body}\n\nCloses #{ticket.id}" if ticket else pr.body
+        link = f"\n\nCloses #{ticket.id}" if ticket else ""
+        body = fit(pr.body, self.MAX_BODY - len(link)) + link
         return self._gh("pr", "create", "--head", branch, "--base", base, "--title", pr.title, "--body", body)
 
     def checks(self, branch: str, head: str) -> list[Check]:
@@ -71,6 +75,7 @@ def _github_check(item: dict[str, Any]) -> Check:
 
 
 class AzureDevOps:
+    MAX_BODY = 4000
     URL_QUERY = "join('', [repository.webUrl, '/pullrequest/', to_string(pullRequestId)])"
     POLICY_STATES: ClassVar[dict[str, CheckState]] = {
         "approved": "passed",
@@ -104,7 +109,7 @@ class AzureDevOps:
     def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
         link = ["--work-items", ticket.id, "--transition-work-items", "true"] if ticket else []
         pr_id = self._az("repos", "pr", "create", "--source-branch", branch, "--target-branch", base,
-                         "--title", pr.title, "--description", pr.body, *link, "--query", "pullRequestId", "-o", "tsv")
+                         "--title", pr.title, "--description", fit(pr.body, self.MAX_BODY), *link, "--query", "pullRequestId", "-o", "tsv")
         return self._web_url(int(pr_id))
 
     def checks(self, branch: str, head: str) -> list[Check]:

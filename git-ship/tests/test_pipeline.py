@@ -27,7 +27,7 @@ from git_ship.pipeline import (
     review_step,
     select_fixes,
 )
-from git_ship.report import with_assessment
+from git_ship.report import fit, with_assessment
 from git_ship.shell import NeedsDecision, ShipError
 
 BUG = Finding(file="m.py", line=2, summary="off by one", needs_user=False)
@@ -57,7 +57,7 @@ class FakeAgent:
         self.fixes.append(instructions)
         (self.cwd / "fixed").write_text(str(len(self.fixes)))
 
-    def write_pr(self, change: Change, fixes: Sequence[str], checks: Sequence[str]) -> PullRequest:
+    def write_pr(self, change: Change) -> PullRequest:
         return PullRequest(title="t", body="b")
 
 
@@ -286,6 +286,13 @@ class HelpersTest(unittest.TestCase):
         self.assertIn("can't watch CI", untested_warning(left_to_ci, None, watched, []))
         self.assertIn("disabled", untested_warning(left_to_ci, github, unwatched, []))
         self.assertIn("no CI checks showed up", untested_warning(left_to_ci, github, watched, []))
+
+    def test_fit_cuts_long_bodies_at_a_line_break(self):
+        self.assertEqual(fit("short", 4000), "short")
+        body = "\n".join(f"- finding {i}" for i in range(1000))
+        cut = fit(body, 4000)
+        self.assertLessEqual(len(cut), 4000)
+        self.assertRegex(cut, r"- finding \d+\n\n\[\.\.\.\] cut")
 
     def test_detect_host(self):
         cwd = Path(".")

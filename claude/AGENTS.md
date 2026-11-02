@@ -22,7 +22,7 @@ Conventional commits that describe the effect in plain lowercase words, e.g. `fi
 
 ### PR descriptions
 
-Written for a reviewer who wasn't there: why, what changed, how it was verified, what is not in this PR.
+Concise, for a reviewer who wasn't there: one to three plain sentences on the problem and the fix, or a short bullet list. No headings, no template.
 
 - Link the ticket through the host, so merging moves it on. Azure: `az repos pr create ... --work-items <n> --transition-work-items true`. GitHub: `Closes #<n>` in the body, `Part of #<n>` when the PR covers only part of it.
 - Stacked PRs name the stack and the merge order in each body.

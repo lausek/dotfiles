@@ -14,3 +14,16 @@ def with_assessment(pr: PullRequest, assessment: Assessment) -> PullRequest:
         kept = "\n".join(f"- {finding}" for finding in assessment.kept)
         body += f"\n\n## Review findings kept as they are\n\n{kept}"
     return PullRequest(title=pr.title, body=body)
+
+
+CUT_NOTE = "\n\n[...] cut to fit the host's description limit"
+
+
+def fit(body: str, limit: int) -> str:
+    """Cuts the body at a line break so it fits the host's limit, instead of failing to create the PR."""
+    if len(body) <= limit:
+        return body
+    keep = body[: limit - len(CUT_NOTE)]
+    if "\n" in keep:
+        keep = keep[: keep.rindex("\n")]
+    return keep.rstrip() + CUT_NOTE

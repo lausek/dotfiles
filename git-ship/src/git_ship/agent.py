@@ -38,6 +38,8 @@ PR_SCHEMA = {
 }
 
 
+PR_BODY_TARGET = 800
+
 DETECTION_SCHEMA = {
     "type": "object",
     "required": ["checks", "sources", "tests_in_ci"],
@@ -56,7 +58,7 @@ class Agent(Protocol):
 
     def fix(self, instructions: str) -> None: ...
 
-    def write_pr(self, change: Change, fixes: Sequence[str], checks: Sequence[str]) -> PullRequest: ...
+    def write_pr(self, change: Change) -> PullRequest: ...
 
 
 class Claude:
@@ -127,18 +129,16 @@ report that as an 'ask-user' finding.
 {instructions}"""
         run("claude", "-p", prompt, "--permission-mode", "acceptEdits", "--allowedTools", EDIT_TOOLS, cwd=self.cwd)
 
-    def write_pr(self, change: Change, fixes: Sequence[str], checks: Sequence[str]) -> PullRequest:
+    def write_pr(self, change: Change) -> PullRequest:
         prompt = f"""Write a pull request for `git diff {change.diff_range}`, for a reviewer who wasn't there.
 Title: a conventional commit describing the effect in plain lowercase words. The scope is the product
 that changed in a monorepo, e.g. 'fix(dpt): ...', and left out in a single-product repo, e.g. 'feat: ...'.
 No ticket numbers in the title.
 {f"The change implements this ticket:{chr(10)}{change.ticket}" if change.ticket else ""}
-Body (markdown): what changed and why, how it was verified, risks.
-No attribution, signature or "Generated with" footer.
-Fixes applied by the validation pipeline:
-{_bullets(fixes) or "none"}
-Checks that passed:
-{_bullets(checks) or "none"}"""
+Body (markdown): concise. One to three plain sentences on the problem and the fix, or a short bullet list
+when the change has several parts. Name what is left out only if a reviewer would expect it in this PR.
+No headings, no template, no lists of files or checks, no attribution or "Generated with" footer.
+Stay under {PR_BODY_TARGET} characters."""
         output = self._structured(prompt, PR_SCHEMA, READ_ONLY_TOOLS)
         return PullRequest(title=output["title"], body=output["body"])
 

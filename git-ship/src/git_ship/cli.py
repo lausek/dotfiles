@@ -102,7 +102,7 @@ def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None
             print(f"unknown host for {remote_url} - pushed, open the PR yourself")
         else:
             step("pull request")
-            open_pr(host, validation, assessment, branch, config.base, checks, wt.subjects(f"{start}..HEAD"))
+            open_pr(host, validation, assessment, branch, config.base)
             if config.ci_timeout_minutes > 0:
                 ci_checks = ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
 
@@ -128,15 +128,13 @@ def untested_warning(detection: Detection, host: Host | None, config: Config, ci
     return f"the tests did not run - they are left to the PR's CI, but {reason}. Check that CI runs them."
 
 
-def open_pr(
-    host: Host, validation: Run, assessment: Assessment, branch: str, base: str, checks: list[str], fixes: list[str]
-) -> None:
+def open_pr(host: Host, validation: Run, assessment: Assessment, branch: str, base: str) -> None:
     existing = host.find_open_pr(branch)
     if existing:
         print(f"PR already open: {existing}")
         return
 
-    pr = validation.agent.write_pr(validation.change, fixes, checks)
+    pr = validation.agent.write_pr(validation.change)
     print(host.create_pr(branch, base, with_assessment(pr, assessment), validation.change.ticket))
 
 
