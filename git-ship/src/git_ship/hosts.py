@@ -2,7 +2,7 @@ import json
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from .models import Check, CheckState, PullRequest
 from .shell import ShipError, run
@@ -63,7 +63,7 @@ def _github_check(item: dict[str, Any]) -> Check:
 
 class AzureDevOps:
     URL_QUERY = "join('', [repository.webUrl, '/pullrequest/', to_string(pullRequestId)])"
-    POLICY_STATES: dict[str, CheckState] = {
+    POLICY_STATES: ClassVar[dict[str, CheckState]] = {
         "approved": "passed",
         "notApplicable": "passed",
         "rejected": "failed",

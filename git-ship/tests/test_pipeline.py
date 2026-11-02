@@ -1,19 +1,32 @@
-import subprocess
+import json
 import tempfile
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
 
-import json
-
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import ticket_from_branch
+from git_ship.cli import needs_decision, ticket_from_branch
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
-from git_ship.models import Assessment, Change, Check, Detection, Finding, PullRequest, Review
-from git_ship.pipeline import Clock, Run, checks_step, ci_step, review_step, select_fixes
+from git_ship.models import (
+    Assessment,
+    Change,
+    Check,
+    Detection,
+    Finding,
+    PullRequest,
+    Review,
+)
+from git_ship.pipeline import (
+    Clock,
+    Run,
+    checks_step,
+    ci_step,
+    review_step,
+    select_fixes,
+)
 from git_ship.report import with_assessment
-from git_ship.shell import ShipError
+from git_ship.shell import NeedsDecision, ShipError
 
 BUG = Finding(file="m.py", line=2, summary="off by one", needs_user=False)
 DECISION = Finding(file="m.py", line=5, summary="should this raise?", needs_user=True)
@@ -74,9 +87,12 @@ class FakeClock(Clock):
         self.time += seconds
 
 
-def answer(*replies: bool):
-    queue = list(replies)
-    return lambda question: queue.pop(0)
+def answer(decision=None):
+    def decide(asks):
+        if decision is None:
+            raise AssertionError(f"unexpected decision on {asks}")
+        return decision
+    return decide
 
 
 class PipelineTest(unittest.TestCase):
@@ -94,8 +110,9 @@ class PipelineTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make_run(self, wt: Git, agent: FakeAgent, ask=answer()) -> Run:
-        return Run(worktree=wt, agent=agent, change=Change("HEAD~1..HEAD", None), rounds=2, ask=ask)
+    def make_run(self, wt: Git, agent: FakeAgent, decide=None) -> Run:
+        change = Change("HEAD~1..HEAD", None)
+        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer())
 
     def test_auto_fixes_are_committed_and_rereviewed(self):
         with worktree(self.repo) as wt:
@@ -107,7 +124,7 @@ class PipelineTest(unittest.TestCase):
     def test_kept_findings_are_passed_to_next_review(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[BUG, DECISION]])
-            review_step(self.make_run(wt, agent, ask=answer(False, True)))
+            review_step(self.make_run(wt, agent, decide=answer("keep")))
             self.assertEqual(agent.kept_per_round[1], [DECISION])
             self.assertNotIn("should this raise", agent.fixes[0])
 
@@ -132,7 +149,7 @@ class PipelineTest(unittest.TestCase):
     def test_review_returns_risk_and_kept_findings(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[DECISION]])
-            assessment = review_step(self.make_run(wt, agent, ask=answer(False, True)))
+            assessment = review_step(self.make_run(wt, agent, decide=answer("keep")))
             self.assertEqual(assessment, Assessment(risk="medium", risk_rationale="touches m.py", kept=[DECISION]))
 
     def test_ci_failure_is_fixed_and_published(self):
@@ -221,14 +238,17 @@ class ResolveChecksTest(unittest.TestCase):
 
 class SelectFixesTest(unittest.TestCase):
     def test_only_auto_fixes_without_asking(self):
-        self.assertEqual(select_fixes([BUG], ask=answer()), [BUG])
+        self.assertEqual(select_fixes([BUG], answer()), [BUG])
 
     def test_user_can_include_decisions(self):
-        self.assertEqual(select_fixes([BUG, DECISION], ask=answer(True)), [BUG, DECISION])
+        self.assertEqual(select_fixes([BUG, DECISION], answer("fix")), [BUG, DECISION])
 
-    def test_user_can_abort(self):
-        with self.assertRaises(ShipError):
-            select_fixes([DECISION], ask=answer(False, False))
+    def test_user_can_keep_decisions(self):
+        self.assertEqual(select_fixes([BUG, DECISION], answer("keep")), [BUG])
+
+    def test_needs_decision_exits_with_2(self):
+        with self.assertRaises(NeedsDecision):
+            select_fixes([DECISION], needs_decision)
 
 
 class HelpersTest(unittest.TestCase):

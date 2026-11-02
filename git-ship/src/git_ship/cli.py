@@ -9,6 +9,7 @@ On the first run, claude detects the local checks (install, lint, tests) and sav
 import argparse
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from .agent import Claude
@@ -17,10 +18,19 @@ from .checks import Approve, resolve_checks
 from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
 from .hosts import Host, detect_host
-from .models import Assessment, Change
-from .pipeline import Ask, Run, checks_step, ci_step, push, review_step, step
+from .models import Assessment, Change, Finding
+from .pipeline import (
+    Decide,
+    Decision,
+    Run,
+    checks_step,
+    ci_step,
+    push,
+    review_step,
+    step,
+)
 from .report import with_assessment
-from .shell import ShipError, run
+from .shell import NeedsDecision, ShipError, run
 
 
 def main() -> int:
@@ -29,17 +39,20 @@ def main() -> int:
     )
     parser.add_argument(
         "-y", "--yes", action="store_true",
-        help="don't ask: save detected checks right away, abort on findings that need a human call",
+        help="don't ask: save detected checks right away, exit with 2 on findings that need a human decision",
     )
+    asks = parser.add_mutually_exclusive_group()
+    asks.add_argument("--fix-asks", action="store_true", help="fix findings that need a human decision too")
+    asks.add_argument("--keep-asks", action="store_true", help="keep findings that need a human decision as they are")
     parser.add_argument("--setup", action="store_true", help="detect the checks again")
     args = parser.parse_args()
 
     try:
         with stay_awake():
-            if args.yes:
-                ship(ask=refuse, approve=accept, redetect=args.setup)
-            else:
-                ship(ask=confirm, approve=confirm, redetect=args.setup)
+            ship(decide=_decider(args), approve=accept if args.yes else confirm, redetect=args.setup)
+    except NeedsDecision as error:
+        print(f"ship: {error}", file=sys.stderr)
+        return 2
     except ShipError as error:
         print(f"ship: {error}", file=sys.stderr)
         return 1
@@ -48,7 +61,17 @@ def main() -> int:
     return 0
 
 
-def ship(ask: Ask, approve: Approve, redetect: bool) -> None:
+def _decider(args: argparse.Namespace) -> Decide:
+    if args.fix_asks:
+        return lambda asks: "fix"
+    if args.keep_asks:
+        return lambda asks: "keep"
+    if args.yes:
+        return needs_decision
+    return prompt_decision
+
+
+def ship(decide: Decide, approve: Approve, redetect: bool) -> None:
     repo = Git(Path(run("git", "rev-parse", "--show-toplevel")))
     config_file = config_path(repo)
     config = load_config(repo, read_config_file(config_file))
@@ -65,7 +88,7 @@ def ship(ask: Ask, approve: Approve, redetect: bool) -> None:
 
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
-        validation = Run(worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, ask=ask)
+        validation = Run(worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide)
         checks = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
         assessment = review_step(validation)
         checks_step(validation, checks)
@@ -111,8 +134,18 @@ def accept(question: str) -> bool:
     return True
 
 
-def refuse(question: str) -> bool:
-    raise ShipError(f"needs a human decision ({question}) - rerun without -y")
+def prompt_decision(asks: Sequence[Finding]) -> Decision:
+    answer = input(f"{len(asks)} ask-user finding(s): [f]ix them, [k]eep them as they are, [a]bort? ")
+    match answer.strip().lower():
+        case "f":
+            return "fix"
+        case "k":
+            return "keep"
+    raise ShipError("aborted")
+
+
+def needs_decision(asks: Sequence[Finding]) -> Decision:
+    raise NeedsDecision(f"{len(asks)} finding(s) need a human decision - rerun with --fix-asks or --keep-asks")
 
 
 def _current_branch(repo: Git, config: Config) -> str:

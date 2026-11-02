@@ -1,0 +1,34 @@
+#!/bin/bash
+# Links the dotfiles into place and installs their tools. Idempotent: rerun it after every pull.
+# Existing files in the way are moved to <path>.backup-<timestamp>, never deleted.
+
+set -euo pipefail
+
+dotfiles=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+
+link() {
+    local source="$dotfiles/$1" target=$2
+    [[ -e "$source" ]] || { echo "install: $1 does not exist in the dotfiles" >&2; exit 1; }
+    [[ -L "$target" && "$(readlink "$target")" == "$source" ]] && return
+
+    mkdir -p "$(dirname "$target")"
+    if [[ -e "$target" || -L "$target" ]]; then
+        local backup
+        backup="$target.backup-$(date +%Y%m%d%H%M%S)"
+        mv "$target" "$backup"
+        echo "moved $target to $backup"
+    fi
+    ln -s "$source" "$target"
+    echo "linked $target"
+}
+
+# claude
+link claude/AGENTS.md ~/.claude/CLAUDE.md
+for skill in "$dotfiles"/claude/skills/*/; do
+    name=$(basename "$skill")
+    link "claude/skills/$name" ~/.claude/skills/"$name"
+done
+
+# tools
+command -v uv >/dev/null || { echo "install: uv is missing, see https://docs.astral.sh/uv/" >&2; exit 1; }
+uv tool install -q -e "$dotfiles/git-ship"

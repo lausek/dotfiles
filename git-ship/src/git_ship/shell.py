@@ -6,8 +6,12 @@ class ShipError(Exception):
     pass
 
 
+class NeedsDecision(ShipError):
+    """Stopped on findings only a human can decide on. Exits with code 2."""
+
+
 def run(*args: str, cwd: Path | None = None) -> str:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         output = result.stderr.strip() or result.stdout.strip()
         raise ShipError(f"`{' '.join(args[:3])} ...` failed:\n{output}")
@@ -15,5 +19,5 @@ def run(*args: str, cwd: Path | None = None) -> str:
 
 
 def try_run(*args: str, cwd: Path | None = None) -> str | None:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
     return result.stdout.strip() if result.returncode == 0 else None

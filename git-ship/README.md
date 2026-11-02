@@ -23,9 +23,14 @@ uv tool install -e ~/dev/lausek/dotfiles/git-ship
 ## Usage
 
 ```sh
-git ship        # asks about findings that need a human call
-git ship -y     # never asks, aborts on those instead
+git ship                # asks about findings that need a human decision
+git ship -y             # never asks, exits with 2 on those instead
+git ship -y --fix-asks  # fix them too
+git ship -y --keep-asks # keep them as they are, they are listed in the PR
 ```
+
+Exit codes: `0` shipped, `1` failed, `2` needs a human decision. The `/ship` Claude Code skill
+(`claude/skills/ship`) drives git-ship with these and asks you about the decisions.
 
 No setup needed. On the first run, Claude detects the local checks (install, lint, typecheck, unit tests)
 from package.json, Makefile, CI pipelines etc. and saves them to `.git/ship.json`, together with a hash of

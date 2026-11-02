@@ -3,6 +3,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import count
+from typing import Literal
 
 from .agent import Agent
 from .git import Git
@@ -10,7 +11,9 @@ from .hosts import Host
 from .models import Assessment, Change, Check, Finding
 from .shell import ShipError
 
-Ask = Callable[[str], bool]
+Decision = Literal["fix", "keep"]
+Decide = Callable[[Sequence[Finding]], Decision]
+"""Decides what to do with ask-user findings. Raises to abort."""
 
 CI_POLL_SECONDS = 30
 CI_NO_CHECKS_GRACE_SECONDS = 180
@@ -23,7 +26,7 @@ class Run:
     agent: Agent
     change: Change
     rounds: int
-    ask: Ask
+    decide: Decide
 
 
 def step(title: str) -> None:
@@ -47,7 +50,7 @@ def review_step(run: Run) -> Assessment:
         if round > run.rounds:
             raise ShipError(f"still findings after {run.rounds} fix rounds")
 
-        to_fix = select_fixes(review.findings, run.ask)
+        to_fix = select_fixes(review.findings, run.decide)
         kept += [finding for finding in review.findings if finding not in to_fix]
         if not to_fix:
             return assessment
@@ -56,25 +59,20 @@ def review_step(run: Run) -> Assessment:
     raise AssertionError("unreachable")
 
 
-def select_fixes(findings: Sequence[Finding], ask: Ask) -> list[Finding]:
-    auto = [finding for finding in findings if not finding.needs_user]
-    decisions = len(findings) - len(auto)
-    if decisions == 0:
-        return auto
-    if ask(f"fix the {decisions} ask-user finding(s) too?"):
+def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[Finding]:
+    asks = [finding for finding in findings if finding.needs_user]
+    if asks and decide(asks) == "fix":
         return list(findings)
-    if ask("keep them as they are and continue?"):
-        return auto
-    raise ShipError("aborted")
+    return [finding for finding in findings if not finding.needs_user]
 
 
-def checks_step(run: Run, checks: Sequence[str]) -> None:
+def checks_step(run: Run, commands: Sequence[str]) -> None:
     """Runs each check in order. A failing check is handed to the agent to fix, then rerun."""
-    for check in checks:
+    for command in commands:
         for round in count(1):
-            step(f"check: {check}")
+            step(f"check: {command}")
             result = subprocess.run(
-                check, shell=True, cwd=run.worktree.cwd,
+                command, shell=True, cwd=run.worktree.cwd, check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             if result.returncode == 0:
@@ -82,12 +80,12 @@ def checks_step(run: Run, checks: Sequence[str]) -> None:
 
             print(_tail(result.stdout, 40))
             if round > run.rounds:
-                raise ShipError(f"'{check}' still failing after {run.rounds} fix rounds")
+                raise ShipError(f"'{command}' still failing after {run.rounds} fix rounds")
 
             fix(
                 run,
-                f"fix: make '{check}' pass",
-                f"The command `{check}` fails. Make it pass by fixing the code, "
+                f"fix: make '{command}' pass",
+                f"The command `{command}` fails. Make it pass by fixing the code, "
                 f"not by weakening or skipping tests. Output (tail):\n\n{_tail(result.stdout, 200)}",
             )
 
@@ -98,7 +96,10 @@ class Clock:
     sleep: Callable[[float], None] = time.sleep
 
 
-def ci_step(run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = Clock()) -> None:
+SYSTEM_CLOCK = Clock()
+
+
+def ci_step(run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = SYSTEM_CLOCK) -> None:
     """Waits for the PR's CI. Failures are handed to the agent with their logs, fixed and published."""
     for round in count(1):
         step(f"CI (round {round})")
