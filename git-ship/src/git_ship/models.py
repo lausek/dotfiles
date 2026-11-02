@@ -51,6 +51,8 @@ class Detection:
     checks: list[str]
     sources: list[str]
     """Files the checks were derived from."""
+    tests_in_ci: bool = False
+    """The tests were left out of the checks because the PR's CI runs them."""
 
 
 @dataclass(frozen=True)

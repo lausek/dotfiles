@@ -5,7 +5,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision
+from git_ship.cli import needs_decision, untested_warning
+from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
 from git_ship.models import (
@@ -202,7 +203,7 @@ class ResolveChecksTest(unittest.TestCase):
         return resolve_checks(self.config_file, self.checkout, self.agent, approve, force)
 
     def test_detects_and_saves_on_first_run(self):
-        self.assertEqual(self.resolve(), ["make test"])
+        self.assertEqual(self.resolve().checks, ["make test"])
         saved = json.loads(self.config_file.read_text())
         self.assertEqual(saved["checks"], ["make test"])
         self.assertEqual(list(saved["sources"]), ["Makefile"])
@@ -211,6 +212,13 @@ class ResolveChecksTest(unittest.TestCase):
         self.resolve()
         self.resolve()
         self.assertEqual(self.agent.detections, 1)
+
+    def test_remembers_that_tests_are_left_to_ci(self):
+        detection = Detection(checks=["make lint"], sources=["Makefile"], tests_in_ci=True)
+        self.agent.detect_checks = lambda: detection
+        self.resolve()
+        self.agent.detect_checks = lambda: self.fail("detected again")
+        self.assertEqual(self.resolve(), detection)
 
     def test_redetects_when_a_source_changes(self):
         self.resolve()
@@ -228,6 +236,13 @@ class ResolveChecksTest(unittest.TestCase):
         after = fingerprint(self.checkout, before)
         self.assertNotEqual(after["ci"], before["ci"])
         self.assertNotEqual(after["Makefile.local"], before["Makefile.local"])
+
+    def test_redetects_when_the_detection_rules_changed(self):
+        self.resolve()
+        saved = json.loads(self.config_file.read_text())
+        self.config_file.write_text(json.dumps(saved | {"detection": 1}))
+        self.resolve()
+        self.assertEqual(self.agent.detections, 2)
 
     def test_keeps_other_settings(self):
         self.config_file.write_text(json.dumps({"base": "develop"}))
@@ -260,6 +275,17 @@ class HelpersTest(unittest.TestCase):
         pr = with_assessment(PullRequest("t", "body"), Assessment("high", "rewrites auth.", [DECISION]))
         self.assertTrue(pr.body.startswith("> 🚨 **High risk** - needs an in-depth review before merging. rewrites auth."))
         self.assertTrue(pr.body.endswith("- m.py:5 - should this raise?"))
+
+    def test_warns_when_tests_left_to_ci_did_not_run(self):
+        left_to_ci = Detection(checks=[], sources=[], tests_in_ci=True)
+        watched, unwatched = Config("main", 3, 60), Config("main", 3, 0)
+        github = GitHub(Path("."))
+        passed = [Check("tests", "passed", "")]
+        self.assertIsNone(untested_warning(left_to_ci, github, watched, passed))
+        self.assertIsNone(untested_warning(Detection(checks=[], sources=[]), None, unwatched, []))
+        self.assertIn("can't watch CI", untested_warning(left_to_ci, None, watched, []))
+        self.assertIn("disabled", untested_warning(left_to_ci, github, unwatched, []))
+        self.assertIn("no CI checks showed up", untested_warning(left_to_ci, github, watched, []))
 
     def test_detect_host(self):
         cwd = Path(".")

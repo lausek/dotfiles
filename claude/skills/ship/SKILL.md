@@ -33,6 +33,7 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 **0 - shipped.** Report:
 - the PR link and the risk line (`risk: low|medium|high - ...` from the last review round)
 - the checks it detected, if a `detect checks` section shows up in the output (they were saved to `.git/ship.json`)
+- any `warning:` line, verbatim. "the tests did not run" means nothing tested the change.
 - the commits git-ship added. If it added any, run `git pull --ff-only` on the branch so the local branch has them.
 
 **2 - needs a human decision.** The review found `[ask-user]` findings and stopped. Show the user these findings, then use AskUserQuestion:

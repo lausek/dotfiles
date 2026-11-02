@@ -3,6 +3,7 @@
     {
       "checks": ["npm ci", "npm run lint", "npm test"],   detected by claude, see checks.py
       "sources": {"package.json": "<sha256>"},            re-detects when these change
+      "detection": 2,                                     re-detects when the detection rules change
       "base": "main",                                     optional, default: origin/HEAD
       "rounds": 3,                                        optional, fix attempts per step
       "ci_timeout_minutes": 60                            optional, 0 disables watching CI

@@ -40,10 +40,11 @@ PR_SCHEMA = {
 
 DETECTION_SCHEMA = {
     "type": "object",
-    "required": ["checks", "sources"],
+    "required": ["checks", "sources", "tests_in_ci"],
     "properties": {
         "checks": {"type": "array", "items": {"type": "string"}},
         "sources": {"type": "array", "items": {"type": "string"}},
+        "tests_in_ci": {"type": "boolean"},
     },
 }
 
@@ -68,7 +69,9 @@ class Claude:
         prompt = """Find the checks a developer of this repository runs locally before pushing.
 They will run in order from the repository root, in a fresh checkout without installed dependencies.
 - First install dependencies if needed, respecting lockfiles (e.g. `npm ci`, `uv sync`, `poetry install`).
-- Then fast checks: format check, lint, typecheck, unit tests.
+- Then fast checks: format check, lint, typecheck.
+- Then the tests, but only if no CI pipeline runs them on pull requests. When CI runs them, leave them
+  out: they cost a lot locally, and failures in the PR's CI are fixed from its logs.
 - Leave out slow or environment-dependent things (e2e, deployments, docker builds, anything needing secrets).
   The PR's CI covers those.
 Take the commands from what the repo already defines: package.json scripts, Makefile, pyproject.toml,
@@ -77,9 +80,10 @@ use the language's standard runner (e.g. `python3 -m pytest`, `go test ./...`, `
 sources: repo-relative paths of the files that define the commands (package.json, Makefile, CI pipeline
 files, ...). Detection reruns whenever one of them changes, so leave out files that change for other
 reasons: lockfiles, docs, CLAUDE.md. Also list such defining files you looked for that don't exist yet,
-so detection reruns when they are added. Return empty checks if the repo has nothing to check."""
+so detection reruns when they are added. Return empty checks if the repo has nothing to check.
+tests_in_ci: true if you left the tests out because CI runs them on pull requests."""
         output = self._structured(prompt, DETECTION_SCHEMA, READ_ONLY_TOOLS)
-        return Detection(checks=output["checks"], sources=output["sources"])
+        return Detection(checks=output["checks"], sources=output["sources"], tests_in_ci=output["tests_in_ci"])
 
     def review(self, change: Change, kept: Sequence[Finding]) -> Review:
         prompt = f"""You are reviewing a change you did not write. Review the full diff `git diff {change.diff_range}`.

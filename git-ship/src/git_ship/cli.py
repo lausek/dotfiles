@@ -17,7 +17,7 @@ from .checks import Approve, resolve_checks
 from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
 from .hosts import Host, detect_host
-from .models import Assessment, Change, Finding, Ticket
+from .models import Assessment, Change, Check, Detection, Finding, Ticket
 from .pipeline import (
     Decide,
     Decision,
@@ -89,24 +89,43 @@ def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
         validation = Run(worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide)
-        checks = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
+        detection = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
+        checks = detection.checks
         assessment = review_step(validation)
         checks_step(validation, checks)
 
         step(f"push {branch}")
         push(wt, branch)
 
+        ci_checks = []
         if host is None:
             print(f"unknown host for {remote_url} - pushed, open the PR yourself")
         else:
             step("pull request")
             open_pr(host, validation, assessment, branch, config.base, checks, wt.subjects(f"{start}..HEAD"))
             if config.ci_timeout_minutes > 0:
-                ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
+                ci_checks = ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
+
+        warning = untested_warning(detection, host, config, ci_checks)
+        if warning:
+            print(f"\nwarning: {warning}", file=sys.stderr)
 
         fixes = wt.subjects(f"{start}..HEAD")
         if fixes:
             print(f"\nship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
+
+
+def untested_warning(detection: Detection, host: Host | None, config: Config, ci_checks: list[Check]) -> str | None:
+    """The tests were left to the PR's CI, but no CI result came back that shows they ran."""
+    if not detection.tests_in_ci or ci_checks:
+        return None
+    if host is None:
+        reason = "git-ship can't watch CI on this host"
+    elif config.ci_timeout_minutes <= 0:
+        reason = "watching CI is disabled (ci_timeout_minutes: 0)"
+    else:
+        reason = "no CI checks showed up on the PR"
+    return f"the tests did not run - they are left to the PR's CI, but {reason}. Check that CI runs them."
 
 
 def open_pr(

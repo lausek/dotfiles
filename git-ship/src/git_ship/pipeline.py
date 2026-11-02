@@ -99,15 +99,18 @@ class Clock:
 SYSTEM_CLOCK = Clock()
 
 
-def ci_step(run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = SYSTEM_CLOCK) -> None:
-    """Waits for the PR's CI. Failures are handed to the agent with their logs, fixed and published."""
+def ci_step(
+    run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = SYSTEM_CLOCK
+) -> list[Check]:
+    """Waits for the PR's CI. Failures are handed to the agent with their logs, fixed and published.
+    Returns the passed checks, empty if none showed up."""
     for round in count(1):
         step(f"CI (round {round})")
         checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, clock)
         failed = [check for check in checks if check.state == "failed"]
         if not failed:
             print("CI passed" if checks else "no CI checks showed up, skipping")
-            return
+            return checks
 
         for check in failed:
             print(f"[failed] {check.name}")

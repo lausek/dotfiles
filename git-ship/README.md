@@ -37,6 +37,9 @@ Exit codes: `0` shipped, `1` failed, `2` needs a human decision. The `/ship` Cla
 No setup needed. On the first run, Claude detects the local checks (install, lint, typecheck, unit tests)
 from package.json, Makefile, CI pipelines etc. and saves them to `.git/ship.json`, together with a hash of
 the files it derived them from. When one of those files changes, the checks are detected again.
+Tests only run locally if no CI pipeline runs them on PRs. Otherwise the PR's CI runs them and failures
+are fixed from its logs. If no CI result comes back (unknown host, `ci_timeout_minutes: 0`, no checks on
+the PR), git-ship warns that the tests did not run.
 If the detected commands differ from the saved ones, you are asked before they are saved (`-y` saves right away).
 
 ```sh
@@ -49,6 +52,7 @@ git ship --setup    # detect the checks again
 {
   "checks": ["npm ci", "npm run lint", "npm test"],
   "sources": {"package.json": "<sha256>"},
+  "detection": 2,
   "base": "main",
   "rounds": 3,
   "ci_timeout_minutes": 60
