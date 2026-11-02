@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import Change, Finding, PullRequest
+from .models import Change, Detection, Finding, PullRequest, Review
 from .shell import ShipError, run
 
 READ_ONLY_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
@@ -11,8 +11,10 @@ EDIT_TOOLS = "Read,Grep,Glob,Edit,Write"
 
 FINDINGS_SCHEMA = {
     "type": "object",
-    "required": ["findings"],
+    "required": ["findings", "risk_level", "risk_rationale"],
     "properties": {
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "risk_rationale": {"type": "string"},
         "findings": {
             "type": "array",
             "items": {
@@ -36,8 +38,20 @@ PR_SCHEMA = {
 }
 
 
+DETECTION_SCHEMA = {
+    "type": "object",
+    "required": ["checks", "sources"],
+    "properties": {
+        "checks": {"type": "array", "items": {"type": "string"}},
+        "sources": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
 class Agent(Protocol):
-    def review(self, change: Change, kept: Sequence[Finding]) -> list[Finding]: ...
+    def detect_checks(self) -> Detection: ...
+
+    def review(self, change: Change, kept: Sequence[Finding]) -> Review: ...
 
     def fix(self, instructions: str) -> None: ...
 
@@ -50,19 +64,42 @@ class Claude:
     def __init__(self, cwd: Path):
         self.cwd = cwd
 
-    def review(self, change: Change, kept: Sequence[Finding]) -> list[Finding]:
+    def detect_checks(self) -> Detection:
+        prompt = """Find the checks a developer of this repository runs locally before pushing.
+They will run in order from the repository root, in a fresh checkout without installed dependencies.
+- First install dependencies if needed, respecting lockfiles (e.g. `npm ci`, `uv sync`, `poetry install`).
+- Then fast checks: format check, lint, typecheck, unit tests.
+- Leave out slow or environment-dependent things (e2e, deployments, docker builds, anything needing secrets).
+  The PR's CI covers those.
+Take the commands from what the repo already defines: package.json scripts, Makefile, pyproject.toml,
+CI pipeline files, README, CLAUDE.md / AGENTS.md. If there are tests but no command for them,
+use the language's standard runner (e.g. `python3 -m pytest`, `go test ./...`, `cargo test`).
+sources: repo-relative paths of the files that define the commands (package.json, Makefile, CI pipeline
+files, ...). Detection reruns whenever one of them changes, so leave out files that change for other
+reasons: lockfiles, docs, CLAUDE.md. Also list such defining files you looked for that don't exist yet,
+so detection reruns when they are added. Return empty checks if the repo has nothing to check."""
+        output = self._structured(prompt, DETECTION_SCHEMA, READ_ONLY_TOOLS)
+        return Detection(checks=output["checks"], sources=output["sources"])
+
+    def review(self, change: Change, kept: Sequence[Finding]) -> Review:
         prompt = f"""You are reviewing a change you did not write. Review the full diff `git diff {change.diff_range}`.
 Report only real problems: bugs, broken edge cases, security issues, missing error handling,
 violations of the repo's conventions (CLAUDE.md / AGENTS.md). No style nitpicks, no praise.
 Mark a finding 'auto-fix' only if the fix is mechanical and unambiguous. If the fix changes
 behavior or intent in a way the author has to decide, mark it 'ask-user'.
-Return an empty list if the change is fine."""
+Return an empty list if the change is fine.
+
+Then assess how carefully a human has to review this change before merging:
+- 'low': well-bounded, mostly cosmetic or straightforward with little ambiguity. A quick look is enough.
+- 'medium': touches behavior that matters, safe to merge once the risky parts were checked.
+- 'high': fundamental, risky or ambiguous. Must not be merged without an in-depth review.
+risk_rationale is one sentence explaining the level and where a reviewer should look."""
         if kept:
             prompt += "\n\nThe author decided to keep these as they are, don't report them again:\n"
             prompt += _bullets(kept)
 
         output = self._structured(prompt, FINDINGS_SCHEMA, READ_ONLY_TOOLS)
-        return [
+        findings = [
             Finding(
                 file=item["file"],
                 line=item.get("line"),
@@ -71,6 +108,7 @@ Return an empty list if the change is fine."""
             )
             for item in output["findings"]
         ]
+        return Review(findings=findings, risk=output["risk_level"], risk_rationale=output["risk_rationale"])
 
     def fix(self, instructions: str) -> None:
         prompt = f"""Fix the following in this repository. Keep the change minimal, don't touch unrelated code.

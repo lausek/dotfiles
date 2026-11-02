@@ -1,14 +1,20 @@
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import count
 
 from .agent import Agent
 from .git import Git
-from .models import Change, Finding
+from .hosts import Host
+from .models import Assessment, Change, Check, Finding
 from .shell import ShipError
 
 Ask = Callable[[str], bool]
+
+CI_POLL_SECONDS = 30
+CI_NO_CHECKS_GRACE_SECONDS = 180
+CI_LOG_LINES = 300
 
 
 @dataclass(frozen=True)
@@ -24,27 +30,30 @@ def step(title: str) -> None:
     print(f"\n\033[1m==> {title}\033[0m", flush=True)
 
 
-def review_step(run: Run) -> None:
+def review_step(run: Run) -> Assessment:
     """Reviews the full change until it is clean. Each round of fixes is reviewed again."""
     kept: list[Finding] = []
     for round in count(1):
         step(f"review (round {round})")
-        findings = run.agent.review(run.change, kept)
-        if not findings:
+        review = run.agent.review(run.change, kept)
+        print(f"risk: {review.risk} - {review.risk_rationale}")
+        assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
+        if not review.findings:
             print("no findings")
-            return
+            return assessment
 
-        for finding in findings:
+        for finding in review.findings:
             print(f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}")
         if round > run.rounds:
             raise ShipError(f"still findings after {run.rounds} fix rounds")
 
-        to_fix = select_fixes(findings, run.ask)
-        kept += [finding for finding in findings if finding not in to_fix]
+        to_fix = select_fixes(review.findings, run.ask)
+        kept += [finding for finding in review.findings if finding not in to_fix]
         if not to_fix:
-            return
+            return assessment
 
         fix(run, "fix: address review findings", "\n".join(f"- {finding}" for finding in to_fix))
+    raise AssertionError("unreachable")
 
 
 def select_fixes(findings: Sequence[Finding], ask: Ask) -> list[Finding]:
@@ -83,6 +92,58 @@ def checks_step(run: Run, checks: Sequence[str]) -> None:
             )
 
 
+@dataclass(frozen=True)
+class Clock:
+    now: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+
+
+def ci_step(run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = Clock()) -> None:
+    """Waits for the PR's CI. Failures are handed to the agent with their logs, fixed and published."""
+    for round in count(1):
+        step(f"CI (round {round})")
+        checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, clock)
+        failed = [check for check in checks if check.state == "failed"]
+        if not failed:
+            print("CI passed" if checks else "no CI checks showed up, skipping")
+            return
+
+        for check in failed:
+            print(f"[failed] {check.name}")
+        if round > run.rounds:
+            raise ShipError(f"CI still failing after {run.rounds} fix rounds")
+
+        logs = "\n\n".join(f"# {check.name}\n{_tail(host.failure_log(check), CI_LOG_LINES)}" for check in failed)
+        fix(
+            run,
+            f"fix: make CI pass ({', '.join(check.name for check in failed)})",
+            "These CI checks fail. Make them pass by fixing the code, not by weakening or skipping tests. "
+            "Only change CI configuration if it is clearly the cause. Logs (tail):\n\n" + logs,
+        )
+        publish()
+    raise AssertionError("unreachable")
+
+
+def wait_for_checks(host: Host, branch: str, head: str, timeout: float, clock: Clock) -> list[Check]:
+    started = clock.now()
+    last_status = ""
+    while True:
+        checks = host.checks(branch, head)
+        elapsed = clock.now() - started
+        if checks and all(check.state != "pending" for check in checks):
+            return checks
+        if not checks and elapsed > CI_NO_CHECKS_GRACE_SECONDS:
+            return []
+        if elapsed > timeout:
+            raise ShipError(f"CI still running after {int(timeout // 60)} min - check the PR yourself")
+
+        status = _ci_status(checks)
+        if status != last_status:
+            print(status, flush=True)
+            last_status = status
+        clock.sleep(CI_POLL_SECONDS)
+
+
 def fix(run: Run, message: str, instructions: str) -> None:
     """Lets the agent fix and commits the result. Untracked files that existed before,
     e.g. build output of a check, are left out of the commit."""
@@ -97,6 +158,18 @@ def fix(run: Run, message: str, instructions: str) -> None:
     if not wt.has_staged_changes():
         raise ShipError(f"the agent made no changes for: {message}")
     wt("commit", "-q", "-m", message)
+
+
+def push(worktree: Git, branch: str) -> None:
+    """Never forces. If the branch moved on the remote, the push fails and nothing is lost."""
+    worktree("push", "-q", "-u", "origin", f"HEAD:refs/heads/{branch}")
+
+
+def _ci_status(checks: Sequence[Check]) -> str:
+    if not checks:
+        return "waiting for CI to pick up the commit..."
+    pending = [check.name for check in checks if check.state == "pending"]
+    return f"{len(checks) - len(pending)}/{len(checks)} checks done, waiting for: {', '.join(pending)}"
 
 
 def _tail(text: str, lines: int) -> str:

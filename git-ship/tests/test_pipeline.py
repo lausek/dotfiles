@@ -4,11 +4,15 @@ import unittest
 from collections.abc import Sequence
 from pathlib import Path
 
+import json
+
+from git_ship.checks import fingerprint, resolve_checks
 from git_ship.cli import ticket_from_branch
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
-from git_ship.models import Change, Finding, PullRequest
-from git_ship.pipeline import Run, checks_step, review_step, select_fixes
+from git_ship.models import Assessment, Change, Check, Detection, Finding, PullRequest, Review
+from git_ship.pipeline import Clock, Run, checks_step, ci_step, review_step, select_fixes
+from git_ship.report import with_assessment
 from git_ship.shell import ShipError
 
 BUG = Finding(file="m.py", line=2, summary="off by one", needs_user=False)
@@ -23,10 +27,16 @@ class FakeAgent:
         self.reviews = reviews
         self.kept_per_round: list[list[Finding]] = []
         self.fixes: list[str] = []
+        self.detections = 0
 
-    def review(self, change: Change, kept: Sequence[Finding]) -> list[Finding]:
+    def detect_checks(self) -> Detection:
+        self.detections += 1
+        return Detection(checks=["make test"], sources=["Makefile"])
+
+    def review(self, change: Change, kept: Sequence[Finding]) -> Review:
         self.kept_per_round.append(list(kept))
-        return self.reviews.pop(0) if self.reviews else []
+        findings = self.reviews.pop(0) if self.reviews else []
+        return Review(findings=findings, risk="medium", risk_rationale="touches m.py")
 
     def fix(self, instructions: str) -> None:
         self.fixes.append(instructions)
@@ -34,6 +44,34 @@ class FakeAgent:
 
     def write_pr(self, change: Change, fixes: Sequence[str], checks: Sequence[str]) -> PullRequest:
         return PullRequest(title="t", body="b")
+
+
+class FakeHost:
+    """Reports scripted check states, one list per poll."""
+
+    def __init__(self, polls: list[list[Check]]):
+        self.polls = polls
+
+    def find_open_pr(self, branch: str) -> str | None:
+        return None
+
+    def create_pr(self, branch: str, base: str, pr: PullRequest) -> str:
+        return "url"
+
+    def checks(self, branch: str, head: str) -> list[Check]:
+        return self.polls.pop(0) if self.polls else []
+
+    def failure_log(self, check: Check) -> str:
+        return f"log of {check.name}"
+
+
+class FakeClock(Clock):
+    def __init__(self):
+        self.time = 0.0
+        super().__init__(now=lambda: self.time, sleep=self._sleep)
+
+    def _sleep(self, seconds: float) -> None:
+        self.time += seconds
 
 
 def answer(*replies: bool):
@@ -91,11 +129,94 @@ class PipelineTest(unittest.TestCase):
             checks_step(self.make_run(wt, agent), ["touch artifact; test -f fixed"])
             self.assertEqual(wt("show", "--name-only", "--format=", "HEAD"), "fixed")
 
+    def test_review_returns_risk_and_kept_findings(self):
+        with worktree(self.repo) as wt:
+            agent = FakeAgent(wt.cwd, [[DECISION]])
+            assessment = review_step(self.make_run(wt, agent, ask=answer(False, True)))
+            self.assertEqual(assessment, Assessment(risk="medium", risk_rationale="touches m.py", kept=[DECISION]))
+
+    def test_ci_failure_is_fixed_and_published(self):
+        pending = Check(name="build", state="pending", ref="")
+        failed = Check(name="build", state="failed", ref="")
+        passed = Check(name="build", state="passed", ref="")
+        published = []
+        with worktree(self.repo) as wt:
+            agent = FakeAgent(wt.cwd, [])
+            host = FakeHost([[pending], [failed], [], [passed]])
+            ci_step(self.make_run(wt, agent), host, "b", lambda: published.append(True), 600, FakeClock())
+            self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: make CI pass (build)"])
+            self.assertIn("log of build", agent.fixes[0])
+            self.assertEqual(published, [True])
+
+    def test_ci_without_checks_is_skipped_after_grace(self):
+        with worktree(self.repo) as wt:
+            ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), FakeHost([]), "b", lambda: None, 600, FakeClock())
+
+    def test_ci_times_out(self):
+        pending = Check(name="build", state="pending", ref="")
+        with worktree(self.repo) as wt:
+            host = FakeHost([[pending]] * 100)
+            with self.assertRaisesRegex(ShipError, "still running"):
+                ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", lambda: None, 600, FakeClock())
+
     def test_worktree_is_removed(self):
         with worktree(self.repo) as wt:
             path = wt.cwd
         self.assertFalse(path.exists())
         self.assertNotIn(str(path), self.repo("worktree", "list"))
+
+
+class ResolveChecksTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.checkout = Path(self.tmp.name)
+        self.config_file = self.checkout / "ship.json"
+        (self.checkout / "Makefile").write_text("test:\n")
+        self.agent = FakeAgent(self.checkout, [])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def resolve(self, approve=lambda q: True, force=False):
+        return resolve_checks(self.config_file, self.checkout, self.agent, approve, force)
+
+    def test_detects_and_saves_on_first_run(self):
+        self.assertEqual(self.resolve(), ["make test"])
+        saved = json.loads(self.config_file.read_text())
+        self.assertEqual(saved["checks"], ["make test"])
+        self.assertEqual(list(saved["sources"]), ["Makefile"])
+
+    def test_uses_saved_checks_while_sources_are_unchanged(self):
+        self.resolve()
+        self.resolve()
+        self.assertEqual(self.agent.detections, 1)
+
+    def test_redetects_when_a_source_changes(self):
+        self.resolve()
+        (self.checkout / "Makefile").write_text("test:\n\tpytest\n")
+        self.resolve()
+        self.assertEqual(self.agent.detections, 2)
+
+    def test_redetects_when_a_source_appears_or_a_directory_changes(self):
+        self.agent.detect_checks = lambda: Detection(checks=["make test"], sources=["ci", "Makefile.local"])
+        self.resolve()
+        before = json.loads(self.config_file.read_text())["sources"]
+        (self.checkout / "ci").mkdir()
+        (self.checkout / "ci" / "pipeline.yml").write_text("steps: []")
+        (self.checkout / "Makefile.local").write_text("")
+        after = fingerprint(self.checkout, before)
+        self.assertNotEqual(after["ci"], before["ci"])
+        self.assertNotEqual(after["Makefile.local"], before["Makefile.local"])
+
+    def test_keeps_other_settings(self):
+        self.config_file.write_text(json.dumps({"base": "develop"}))
+        self.resolve()
+        self.assertEqual(json.loads(self.config_file.read_text())["base"], "develop")
+
+    def test_declining_saves_nothing(self):
+        with self.assertRaises(ShipError):
+            self.resolve(approve=lambda q: False)
+        self.assertFalse(self.config_file.exists())
 
 
 class SelectFixesTest(unittest.TestCase):
@@ -111,6 +232,11 @@ class SelectFixesTest(unittest.TestCase):
 
 
 class HelpersTest(unittest.TestCase):
+    def test_pr_body_starts_with_review_depth_and_ends_with_kept(self):
+        pr = with_assessment(PullRequest("t", "body"), Assessment("high", "rewrites auth.", [DECISION]))
+        self.assertTrue(pr.body.startswith("> 🚨 **High risk** - needs an in-depth review before merging. rewrites auth."))
+        self.assertTrue(pr.body.endswith("- m.py:5 - should this raise?"))
+
     def test_ticket_from_branch(self):
         self.assertEqual(ticket_from_branch("feat/1234-avg"), "1234")
         self.assertIsNone(ticket_from_branch("fix/v2-typo"))

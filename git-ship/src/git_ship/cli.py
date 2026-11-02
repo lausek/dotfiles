@@ -1,12 +1,9 @@
-"""git ship - validate the current branch in a disposable worktree, then push and open a PR.
+"""git ship - validate the current branch in a disposable worktree, then push, open a PR and watch CI.
 
-  review -> fix -> checks -> fix -> push -> PR (GitHub or Azure DevOps)
+  detect checks -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix (GitHub or Azure DevOps)
 
-Per-repo config (all optional):
-  git config --add ship.check "npm ci"     commands run in the worktree, in order
-  git config --add ship.check "npm test"
-  git config ship.base main                 default: origin/HEAD
-  git config ship.rounds 3                  fix attempts per step, default 3
+On the first run, claude detects the local checks (install, lint, tests) and saves them to
+.git/ship.json. They are detected again when the files they came from change.
 """
 
 import argparse
@@ -15,11 +12,14 @@ import sys
 from pathlib import Path
 
 from .agent import Claude
-from .config import Config, load_config
+from .awake import stay_awake
+from .checks import Approve, resolve_checks
+from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
-from .hosts import detect_host
-from .models import Change
-from .pipeline import Ask, Run, checks_step, review_step, step
+from .hosts import Host, detect_host
+from .models import Assessment, Change
+from .pipeline import Ask, Run, checks_step, ci_step, push, review_step, step
+from .report import with_assessment
 from .shell import ShipError, run
 
 
@@ -27,11 +27,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="git ship", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("-y", "--yes", action="store_true", help="don't ask, abort on findings that need a human call")
+    parser.add_argument(
+        "-y", "--yes", action="store_true",
+        help="don't ask: save detected checks right away, abort on findings that need a human call",
+    )
+    parser.add_argument("--setup", action="store_true", help="detect the checks again")
     args = parser.parse_args()
 
     try:
-        ship(refuse if args.yes else confirm)
+        with stay_awake():
+            if args.yes:
+                ship(ask=refuse, approve=accept, redetect=args.setup)
+            else:
+                ship(ask=confirm, approve=confirm, redetect=args.setup)
     except ShipError as error:
         print(f"ship: {error}", file=sys.stderr)
         return 1
@@ -40,10 +48,13 @@ def main() -> int:
     return 0
 
 
-def ship(ask: Ask) -> None:
+def ship(ask: Ask, approve: Approve, redetect: bool) -> None:
     repo = Git(Path(run("git", "rev-parse", "--show-toplevel")))
-    config = load_config(repo)
+    config_file = config_path(repo)
+    config = load_config(repo, read_config_file(config_file))
     branch = _current_branch(repo, config)
+    remote_url = repo("remote", "get-url", "origin")
+    host = detect_host(remote_url, repo.cwd)
 
     repo("fetch", "-q", "origin", config.base)
     merge_base = repo("merge-base", "HEAD", f"origin/{config.base}")
@@ -55,33 +66,36 @@ def ship(ask: Ask) -> None:
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
         validation = Run(worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, ask=ask)
-        review_step(validation)
-        checks_step(validation, config.checks)
+        checks = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
+        assessment = review_step(validation)
+        checks_step(validation, checks)
 
         step(f"push {branch}")
-        wt("push", "-q", "-u", "origin", f"HEAD:refs/heads/{branch}")
+        push(wt, branch)
+
+        if host is None:
+            print(f"unknown host for {remote_url} - pushed, open the PR yourself")
+        else:
+            step("pull request")
+            open_pr(host, validation, assessment, branch, config.base, checks, wt.subjects(f"{start}..HEAD"))
+            if config.ci_timeout_minutes > 0:
+                ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
+
         fixes = wt.subjects(f"{start}..HEAD")
         if fixes:
-            print(f"ship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
-
-        step("pull request")
-        open_pr(repo, validation, branch, config, fixes)
+            print(f"\nship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
 
 
-def open_pr(repo: Git, validation: Run, branch: str, config: Config, fixes: list[str]) -> None:
-    remote_url = repo("remote", "get-url", "origin")
-    host = detect_host(remote_url, repo.cwd)
-    if host is None:
-        print(f"unknown host for {remote_url} - pushed, open the PR yourself")
-        return
-
+def open_pr(
+    host: Host, validation: Run, assessment: Assessment, branch: str, base: str, checks: list[str], fixes: list[str]
+) -> None:
     existing = host.find_open_pr(branch)
     if existing:
         print(f"PR already open: {existing}")
         return
 
-    pr = validation.agent.write_pr(validation.change, fixes, config.checks)
-    print(host.create_pr(branch, config.base, pr))
+    pr = validation.agent.write_pr(validation.change, fixes, checks)
+    print(host.create_pr(branch, base, with_assessment(pr, assessment)))
 
 
 def ticket_from_branch(branch: str) -> str | None:
@@ -91,6 +105,10 @@ def ticket_from_branch(branch: str) -> str | None:
 
 def confirm(question: str) -> bool:
     return input(f"{question} [y/N] ").strip().lower() == "y"
+
+
+def accept(question: str) -> bool:
+    return True
 
 
 def refuse(question: str) -> bool:
