@@ -572,6 +572,19 @@ class TerminalUiTest(unittest.TestCase):
         self.assertEqual(lines[review + 7].index("check"), lines[review].index("review"))
         self.assertTrue(all(len(line) <= 60 for line in lines))
 
+    def test_wrapped_details_hang_under_their_text(self):
+        ui = self.make_ui()
+        ui.start("review", "review")
+        ui.details("review", ["[auto-fix] " + "word " * 30, "[ask-user] short"])
+        ui.done("review")
+        ui.console.print(ui._render(all_details=True))
+        lines = ui.console.export_text().splitlines()
+        first = next(index for index, line in enumerate(lines) if "[auto-fix]" in line)
+        text_column = lines[first].index("word")
+        self.assertEqual(lines[first + 1][:text_column].strip(), "")
+        self.assertEqual(lines[first + 1][text_column:text_column + 4], "word")
+        self.assertTrue(any(line.startswith("    [ask-user] short") for line in lines))
+
     def test_restart_shows_the_attempt_and_resets_the_steps(self):
         ui = self.make_ui()
         ui.start("review", "review")
@@ -586,13 +599,15 @@ class TerminalUiTest(unittest.TestCase):
 class PromptDecisionTest(unittest.TestCase):
     def test_question_lists_the_findings(self):
         class Asking(PlainUi):
-            def ask(self, question: str) -> str:
+            def ask(self, question: str, details=()) -> str:
                 self.question = question
+                self.details = list(details)
                 return "k"
 
         ui = Asking()
-        self.assertEqual(prompt_decision(ui, [DECISION]), "keep")
-        self.assertIn("m.py:5 - should this raise?", ui.question)
+        self.assertEqual(prompt_decision(ui, [BUG, DECISION]), "keep")
+        self.assertEqual(ui.details, ["[auto-fix] m.py:2 - off by one", "[ask-user] m.py:5 - should this raise?"])
+        self.assertIn("1 finding(s) need your decision, the 1 auto-fix one(s) are fixed either way", ui.question)
 
 
 

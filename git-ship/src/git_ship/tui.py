@@ -3,6 +3,7 @@ pinned at the bottom of the terminal and shows which one runs, what it does righ
 What a step found, e.g. the review's findings, shows under it. When the pipeline starts over after a fix,
 the finished attempt is kept in the scrollback and the same steps run again from the top."""
 
+import re
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -17,6 +18,11 @@ from .ui import PlannedStep, Progress, Step
 
 LIVE_DETAIL_LINES = 6
 """Per step. The live list can't be taller than the terminal, the copy in the scrollback has them all."""
+MORE = "... "
+
+TAG = re.compile(r"\[([\w-]+)\] ")
+"""What a detail line is, e.g. `[auto-fix]`."""
+TAG_STYLES = {"auto-fix": "bold cyan", "ask-user": "bold yellow", "conflict": "bold red", "failed": "bold red"}
 
 ICONS = {
     "pending": Text("·", style="dim"),
@@ -86,10 +92,12 @@ class TerminalUi:
         # Not markup: findings like "[auto-fix] ..." would be read as style tags.
         self.console.print(Text(text))
 
-    def ask(self, question: str) -> str:
+    def ask(self, question: str, details: Sequence[str] = ()) -> str:
         self._live.stop()
         try:
-            return self.console.input(Text(question, style="bold"))
+            if details:
+                self.console.print(_details(list(details), all_details=True))
+            return self.console.input(_question(question))
         finally:
             # A new one: a restarted Live still knows the height of its old area and would draw over the question.
             self._live = self._new_live()
@@ -139,20 +147,40 @@ def _table(title_width: int) -> Table:
     return table
 
 
-def _details(lines: list[str], all_details: bool) -> Table:
+def _details(lines: list[str], all_details: bool) -> RenderableType:
     """Indented under the step. Live they are cut to one line each, in the scrollback they wrap."""
-    table = Table.grid(expand=True)
-    table.add_column(width=4, min_width=4)
-    table.add_column(ratio=1, overflow="fold" if all_details else "ellipsis", no_wrap=not all_details)
-    for line in _shown(lines, all_details):
-        table.add_row("", Text(line))
+    return Group(*(_detail(line, all_details) for line in _shown(lines, all_details)))
+
+
+def _detail(line: str, all_details: bool) -> Table:
+    """A line starting with a tag like `[auto-fix]` gets the tag colored and a hanging indent, so where it
+    wraps, the text continues under the text and the next tag shows where the next item starts."""
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(width=3, min_width=3)
+    overflow = "fold" if all_details else "ellipsis"
+    tag = TAG.match(line)
+    if tag:
+        table.add_column(no_wrap=True)
+        table.add_column(ratio=1, overflow=overflow, no_wrap=not all_details)
+        style = TAG_STYLES.get(tag.group(1), "bold")
+        table.add_row("", Text(tag.group(0).rstrip(), style=style), Text(line[tag.end():]))
+    else:
+        table.add_column(ratio=1, overflow=overflow, no_wrap=not all_details)
+        table.add_row("", Text(line, style="dim" if line.startswith(MORE) else ""))
     return table
+
+
+def _question(question: str) -> Text:
+    """Plain, with the answer keys like `[f]` highlighted."""
+    text = Text(question)
+    text.highlight_regex(r"\[\w\]", "bold cyan")
+    return text
 
 
 def _shown(details: list[str], all_details: bool) -> list[str]:
     if all_details or len(details) <= LIVE_DETAIL_LINES:
         return details
-    return [*details[: LIVE_DETAIL_LINES - 1], f"... {len(details) - LIVE_DETAIL_LINES + 1} more"]
+    return [*details[: LIVE_DETAIL_LINES - 1], f"{MORE}{len(details) - LIVE_DETAIL_LINES + 1} more"]
 
 
 def _title_style(step: Step) -> str:

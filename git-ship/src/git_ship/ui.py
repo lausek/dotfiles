@@ -42,7 +42,9 @@ class Ui(Protocol):
     def restart(self, attempt: int, attempts: int, reason: str) -> None:
         """The pipeline starts over from the top after a fix."""
 
-    def ask(self, question: str) -> str: ...
+    def ask(self, question: str, details: Sequence[str] = ()) -> str:
+        """`details` are what the question is about, e.g. findings, shown above it."""
+        ...
 
 
 class PlainUi:
@@ -77,7 +79,9 @@ class PlainUi:
     def restart(self, attempt: int, attempts: int, reason: str) -> None:
         print(f"\n\033[1m=== {reason} - starting over (attempt {attempt}/{attempts})\033[0m", flush=True)
 
-    def ask(self, question: str) -> str:
+    def ask(self, question: str, details: Sequence[str] = ()) -> str:
+        for line in details:
+            print(line, flush=True)
         return input(question)
 
 

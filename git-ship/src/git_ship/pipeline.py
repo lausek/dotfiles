@@ -16,7 +16,7 @@ from .ui import PlannedStep, Ui
 
 Decision = Literal["fix", "keep"]
 Decide = Callable[[Sequence[Finding]], Decision]
-"""Decides what to do with ask-user findings. Raises to abort."""
+"""Decides what to do with the ask-user findings among a review's findings. Raises to abort."""
 
 CI_POLL_SECONDS = 30
 CI_NO_CHECKS_GRACE_SECONDS = 180
@@ -217,7 +217,7 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         source = ["(the last run reviewed this commit already)"]
     # A review remembered from before you kept some of its findings still has them.
     open_findings = [finding for finding in review.findings if finding not in kept]
-    findings = [f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}" for finding in open_findings]
+    findings = [finding.tagged() for finding in open_findings]
     run.ui.details(
         "review", [*source, f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])]
     )
@@ -254,7 +254,7 @@ def _review_key(run: Run) -> str:
 
 def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[Finding]:
     asks = [finding for finding in findings if finding.needs_user]
-    if asks and decide(asks) == "fix":
+    if asks and decide(findings) == "fix":
         return list(findings)
     return [finding for finding in findings if not finding.needs_user]
 

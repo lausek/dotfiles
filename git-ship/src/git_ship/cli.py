@@ -84,12 +84,12 @@ def _interactive() -> bool:
 
 def _decider(args: argparse.Namespace, ui: Ui) -> Decide:
     if args.fix_asks:
-        return lambda asks: "fix"
+        return lambda findings: "fix"
     if args.keep_asks:
-        return lambda asks: "keep"
+        return lambda findings: "keep"
     if args.yes:
         return needs_decision
-    return lambda asks: prompt_decision(ui, asks)
+    return lambda findings: prompt_decision(ui, findings)
 
 
 def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
@@ -210,11 +210,14 @@ def accept(question: str) -> bool:
     return True
 
 
-def prompt_decision(ui: Ui, asks: Sequence[Finding]) -> Decision:
-    # The question lists them itself: the TUI takes its step list down while it asks.
-    findings = "\n".join(f"  - {finding}" for finding in asks)
+def prompt_decision(ui: Ui, findings: Sequence[Finding]) -> Decision:
+    asks = [finding for finding in findings if finding.needs_user]
+    auto_fixes = len(findings) - len(asks)
+    either_way = f", the {auto_fixes} auto-fix one(s) are fixed either way" if auto_fixes else ""
+    # The findings come with the question: the TUI takes its step list down while it asks.
     answer = ui.ask(
-        f"{len(asks)} finding(s) need your decision:\n{findings}\n[f]ix them, [k]eep them as they are, [a]bort? "
+        f"{len(asks)} finding(s) need your decision{either_way}. [f]ix them, [k]eep them as they are, [a]bort? ",
+        details=[finding.tagged() for finding in findings],
     )
     match answer.strip().lower():
         case "f":
@@ -224,7 +227,8 @@ def prompt_decision(ui: Ui, asks: Sequence[Finding]) -> Decision:
     raise ShipError("aborted")
 
 
-def needs_decision(asks: Sequence[Finding]) -> Decision:
+def needs_decision(findings: Sequence[Finding]) -> Decision:
+    asks = [finding for finding in findings if finding.needs_user]
     raise NeedsDecision(f"{len(asks)} finding(s) need a human decision - rerun with --fix-asks or --keep-asks")
 
 

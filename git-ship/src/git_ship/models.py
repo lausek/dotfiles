@@ -15,6 +15,10 @@ class Finding:
     def __str__(self) -> str:
         return f"{self.file}:{self.line or '-'} - {self.summary}"
 
+    def tagged(self) -> str:
+        """With what to do about it in front, e.g. `[auto-fix] m.py:2 - off by one`."""
+        return f"[{'ask-user' if self.needs_user else 'auto-fix'}] {self}"
+
 
 @dataclass(frozen=True)
 class Review:
