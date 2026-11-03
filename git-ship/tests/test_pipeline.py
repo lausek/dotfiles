@@ -3,9 +3,11 @@ import io
 import json
 import tempfile
 import unittest
+import unittest.mock
 from collections.abc import Sequence
 from pathlib import Path
 
+from git_ship import shell
 from git_ship.checks import fingerprint, resolve_checks
 from git_ship.cli import keep_fixes, needs_decision, prompt_decision, untested_warning
 from git_ship.config import Config
@@ -664,6 +666,42 @@ class ReadOnlyTest(unittest.TestCase):
             link.symlink_to(target)
             self.assertEqual(_read_only(link), f"Read(/{link}),Read(/{target.resolve()})")
             self.assertEqual(_read_only(target), f"Read(/{target.resolve()})")
+
+
+class RetryTest(unittest.TestCase):
+    """A command that fails the first `fails` times with `error`, counting its attempts in a file."""
+
+    def _flaky(self, tmp: Path, fails: int, error: str) -> tuple[str, Path]:
+        attempts = tmp / "attempts"
+        script = (
+            f"n=$(( $(cat {attempts} 2>/dev/null || echo 0) + 1 )); echo $n > {attempts}; "
+            f"[ $n -gt {fails} ] && echo ok && exit 0; echo '{error}' >&2; exit 128"
+        )
+        return script, attempts
+
+    def setUp(self) -> None:
+        patcher = unittest.mock.patch.object(shell, "RETRY_DELAYS", (0, 0, 0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_retries_a_connection_dropped_before_the_handshake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script, attempts = self._flaky(Path(tmp), 2, "kex_exchange_identification: read: Connection reset by peer")
+            self.assertEqual(shell.run("sh", "-c", script), "ok")
+            self.assertEqual(attempts.read_text().strip(), "3")
+
+    def test_gives_up_after_the_last_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script, attempts = self._flaky(Path(tmp), 9, "Connection reset by 20.166.41.2 port 22")
+            self.assertIsNone(shell.try_run("sh", "-c", script))
+            self.assertEqual(attempts.read_text().strip(), "4")
+
+    def test_does_not_retry_other_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script, attempts = self._flaky(Path(tmp), 1, "! [rejected] main -> main (non-fast-forward)")
+            with self.assertRaises(ShipError):
+                shell.run("sh", "-c", script)
+            self.assertEqual(attempts.read_text().strip(), "1")
 
 
 if __name__ == "__main__":
