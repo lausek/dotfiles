@@ -3,6 +3,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import count
+from pathlib import Path
 from typing import Literal
 
 from .agent import Agent
@@ -20,6 +21,13 @@ CI_NO_CHECKS_GRACE_SECONDS = 180
 CI_LOG_LINES = 300
 
 
+CONFLICT_MARKERS = ("<<<<<<< ", "||||||| ", ">>>>>>> ")
+
+
+class MergeConflict(ShipError):
+    """The PR has merge conflicts with its base, so its CI doesn't run."""
+
+
 @dataclass(frozen=True)
 class Run:
     worktree: Git
@@ -27,10 +35,55 @@ class Run:
     change: Change
     rounds: int
     decide: Decide
+    base: str
+    """Branch the PR merges into, e.g. 'main'."""
 
 
 def step(title: str) -> None:
     print(f"\n\033[1m==> {title}\033[0m", flush=True)
+
+
+def merge_step(run: Run) -> bool:
+    """The PR's CI doesn't run while the branch conflicts with the base. If it does, the base is merged in
+    and the agent resolves the conflicts. A clean merge is left to the host, the branch stays as it is.
+    Returns whether it merged."""
+    base = f"origin/{run.base}"
+    run.worktree("fetch", "-q", "origin", run.base)
+    conflicted = run.worktree.merge_conflicts(base)
+    if not conflicted:
+        return False
+
+    step(f"resolve merge conflicts with {base}")
+    for path in conflicted:
+        print(f"[conflict] {path}")
+    untracked_before = run.worktree.untracked()
+    for round in count(1):
+        run.agent.fix(
+            f"`{base}` is being merged into this branch and these files have conflicts:\n"
+            + "\n".join(f"- {path}" for path in conflicted)
+            + "\n\nResolve every conflict so that the branch's change applies on top of what changed on the base, "
+            "keeping the intent of both sides. The markers are in diff3 style: between `|||||||` and `=======` "
+            "is the common ancestor, above it the branch, below it the base. Remove all conflict markers. "
+            "Don't change anything beyond the conflicts."
+        )
+        remaining = [path for path in conflicted if _has_conflict_markers(run.worktree.cwd / path)]
+        if not remaining:
+            break
+        if round > run.rounds:
+            run.worktree("merge", "--abort")
+            raise ShipError(f"merge conflicts with {base} still unresolved after {run.rounds} rounds: {', '.join(remaining)}")
+        conflicted = remaining
+    # Committed even without content changes: the merge commit makes the base a parent, which resolves the PR.
+    _stage(run.worktree, untracked_before)
+    run.worktree("commit", "-q", "-m", f"chore: merge {base} and resolve conflicts")
+    return True
+
+
+def _has_conflict_markers(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    lines = path.read_text(errors="replace").splitlines()
+    return any(line.startswith(CONFLICT_MARKERS) for line in lines)
 
 
 def review_step(run: Run) -> Assessment:
@@ -106,7 +159,17 @@ def ci_step(
     Returns the passed checks, empty if none showed up."""
     for round in count(1):
         step(f"CI (round {round})")
-        checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, clock)
+        try:
+            checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, clock)
+        except MergeConflict:
+            if round > run.rounds:
+                raise
+            print("the base moved and the PR has merge conflicts now")
+            if not merge_step(run):
+                raise ShipError(f"the PR reports merge conflicts, but origin/{run.base} merges cleanly here - check the PR yourself")
+            publish()
+            continue
+
         failed = [check for check in checks if check.state == "failed"]
         if not failed:
             print("CI passed" if checks else "no CI checks showed up, skipping")
@@ -136,6 +199,9 @@ def wait_for_checks(host: Host, branch: str, head: str, timeout: float, clock: C
         elapsed = clock.now() - started
         if checks and all(check.state != "pending" for check in checks):
             return checks
+        # Right after a push the host may still report the conflicts of the previous commit.
+        if elapsed >= CI_POLL_SECONDS and host.has_conflicts(branch):
+            raise MergeConflict("the PR has merge conflicts with its base, so CI won't run")
         if not checks and elapsed > CI_NO_CHECKS_GRACE_SECONDS:
             return []
         if elapsed > timeout:
@@ -149,19 +215,25 @@ def wait_for_checks(host: Host, branch: str, head: str, timeout: float, clock: C
 
 
 def fix(run: Run, message: str, instructions: str) -> None:
-    """Lets the agent fix and commits the result. Untracked files that existed before,
-    e.g. build output of a check, are left out of the commit."""
-    wt = run.worktree
-    untracked_before = wt.untracked()
+    """Lets the agent fix and commits the result."""
+    untracked_before = run.worktree.untracked()
     run.agent.fix(instructions)
+    _commit(run.worktree, untracked_before, message)
 
+
+def _commit(wt: Git, untracked_before: set[str], message: str) -> None:
+    _stage(wt, untracked_before)
+    if not wt.has_staged_changes():
+        raise ShipError(f"the agent made no changes for: {message}")
+    wt("commit", "-q", "-m", message)
+
+
+def _stage(wt: Git, untracked_before: set[str]) -> None:
+    """Stages the agent's changes. Untracked files that existed before, e.g. build output of a check, are left out."""
     created = sorted(wt.untracked() - untracked_before)
     wt("add", "-u")
     if created:
         wt("add", "--", *created)
-    if not wt.has_staged_changes():
-        raise ShipError(f"the agent made no changes for: {message}")
-    wt("commit", "-q", "-m", message)
 
 
 def push(worktree: Git, branch: str) -> None:

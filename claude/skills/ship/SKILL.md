@@ -34,7 +34,7 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 - the PR link and the risk line (`risk: low|medium|high - ...` from the last review round)
 - the checks it detected, if a `detect checks` section shows up in the output (they were saved to `.git/ship.json`)
 - any `warning:` line, verbatim. "the tests did not run" means nothing tested the change.
-- the commits git-ship added. If it added any, run `git pull --ff-only` on the branch so the local branch has them.
+- the commits git-ship added, including a `chore: merge origin/<base> and resolve conflicts` if it resolved conflicts. Ask the user to look at that resolution in the PR. If it added any, run `git pull --ff-only` on the branch so the local branch has them.
 
 **2 - needs a human decision.** The review found `[ask-user]` findings and stopped. Show the user these findings, then use AskUserQuestion:
 - "Fix them" -> rerun with `--fix-asks` added, in the background
@@ -46,3 +46,5 @@ The rerun reviews again from scratch. If it stops with exit 2 once more, ask aga
 - "still findings after N fix rounds" / "still failing after N fix rounds": the fixer couldn't solve it. Show the remaining findings or failure.
 - "CI still running after N min": CI is slow, not broken. The PR exists, the user can rerun `/ship` later.
 - a rejected push: the remote branch moved. Suggest pulling and rerunning.
+- "merge conflicts ... still unresolved": git-ship merges the base in and resolves conflicts on its own, this means it couldn't. Show the files and the error.
+- "reports merge conflicts, but ... merges cleanly here": the host and git disagree. Show the PR link and stop.

@@ -1,6 +1,6 @@
 """git ship - validate the current branch in a disposable worktree, then push, open a PR and watch CI.
 
-  detect checks -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix (GitHub or Azure DevOps)
+  resolve conflicts -> detect checks -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix (GitHub or Azure DevOps)
 
 On the first run, claude detects the local checks (install, lint, tests) and saves them to
 .git/ship.json. They are detected again when the files they came from change.
@@ -24,6 +24,7 @@ from .pipeline import (
     Run,
     checks_step,
     ci_step,
+    merge_step,
     push,
     review_step,
     step,
@@ -84,11 +85,15 @@ def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None
     if not repo("rev-list", f"{merge_base}..HEAD"):
         raise ShipError(f"no commits ahead of origin/{config.base}")
 
-    change = Change(diff_range=f"{merge_base}..HEAD", ticket=_fetch_ticket(host, ticket_id))
+    # Three dots: the diff from where the branch last met the base, so a merge of the base doesn't show up in it.
+    change = Change(diff_range=f"origin/{config.base}...HEAD", ticket=_fetch_ticket(host, ticket_id))
 
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
-        validation = Run(worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide)
+        validation = Run(
+            worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base
+        )
+        merge_step(validation)
         detection = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
         checks = detection.checks
         assessment = review_step(validation)

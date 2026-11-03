@@ -24,6 +24,7 @@ from git_ship.pipeline import (
     Run,
     checks_step,
     ci_step,
+    merge_step,
     review_step,
     select_fixes,
 )
@@ -61,11 +62,27 @@ class FakeAgent:
         return PullRequest(title="t", body="b")
 
 
+class ResolvingAgent(FakeAgent):
+    """Resolves conflicts by writing `resolution` to every file, or leaves them when it is None."""
+
+    def __init__(self, cwd: Path, resolution: str | None):
+        super().__init__(cwd, [])
+        self.resolution = resolution
+
+    def fix(self, instructions: str) -> None:
+        self.fixes.append(instructions)
+        if self.resolution is not None:
+            for line in instructions.splitlines():
+                if line.startswith("- "):
+                    (self.cwd / line[2:]).write_text(self.resolution)
+
+
 class FakeHost:
     """Reports scripted check states, one list per poll."""
 
-    def __init__(self, polls: list[list[Check]]):
+    def __init__(self, polls: list[list[Check]], conflicts: bool = False):
         self.polls = polls
+        self.conflicts = conflicts
 
     def fetch_ticket(self, ticket_id: str) -> Ticket:
         return Ticket(id=ticket_id, title="t", description="d")
@@ -75,6 +92,9 @@ class FakeHost:
 
     def create_pr(self, branch: str, base: str, pr: PullRequest, ticket: Ticket | None) -> str:
         return "url"
+
+    def has_conflicts(self, branch: str) -> bool:
+        return self.conflicts
 
     def checks(self, branch: str, head: str) -> list[Check]:
         return self.polls.pop(0) if self.polls else []
@@ -105,6 +125,8 @@ class PipelineTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Git(Path(self.tmp.name))
         self.repo("init", "-q")
+        self.repo("checkout", "-q", "-b", "main")
+        self.repo("remote", "add", "origin", str(self.repo.cwd))
         self.repo("config", "user.email", "test@example.com")
         self.repo("config", "user.name", "test")
         self.repo("config", "commit.gpgsign", "false")
@@ -117,7 +139,19 @@ class PipelineTest(unittest.TestCase):
 
     def make_run(self, wt: Git, agent: FakeAgent, decide=None) -> Run:
         change = Change("HEAD~1..HEAD", None)
-        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer())
+        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main")
+
+    def diverge(self, ours: str = "ours", theirs: str = "theirs"):
+        """Puts the repo on a branch whose change to `a` conflicts with main's."""
+        self.repo("checkout", "-q", "-b", "feature")
+        (self.repo.cwd / "a").write_text(ours)
+        self.repo("commit", "-qam", "ours")
+        self.repo("checkout", "-q", "main")
+        (self.repo.cwd / "a").write_text(theirs)
+        (self.repo.cwd / "b").write_text("b")
+        self.repo("add", "-A")
+        self.repo("commit", "-qm", "theirs")
+        self.repo("checkout", "-q", "feature")
 
     def test_auto_fixes_are_committed_and_rereviewed(self):
         with worktree(self.repo) as wt:
@@ -179,6 +213,67 @@ class PipelineTest(unittest.TestCase):
         with worktree(self.repo) as wt:
             host = FakeHost([[pending]] * 100)
             with self.assertRaisesRegex(ShipError, "still running"):
+                ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", lambda: None, 600, FakeClock())
+
+    def test_merge_step_leaves_a_branch_without_conflicts_alone(self):
+        with worktree(self.repo) as wt:
+            head = wt("rev-parse", "HEAD")
+            self.assertFalse(merge_step(self.make_run(wt, FakeAgent(wt.cwd, []))))
+            self.assertEqual(wt("rev-parse", "HEAD"), head)
+            self.assertTrue(wt.is_clean())
+
+    def test_merge_step_resolves_conflicts_in_a_merge_commit(self):
+        self.diverge()
+        with worktree(self.repo) as wt:
+            agent = ResolvingAgent(wt.cwd, "both")
+            self.assertTrue(merge_step(self.make_run(wt, agent)))
+            self.assertIn("- a\n", agent.fixes[0])
+            self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["chore: merge origin/main and resolve conflicts"])
+            self.assertEqual(wt("rev-parse", "HEAD^2"), wt("rev-parse", "main"))
+            self.assertEqual((wt.cwd / "a").read_text(), "both")
+            self.assertEqual((wt.cwd / "b").read_text(), "b")
+            self.assertTrue(wt.is_clean())
+
+    def test_merge_step_commits_a_resolution_without_content_changes(self):
+        self.diverge()
+        with worktree(self.repo) as wt:
+            merge_step(self.make_run(wt, ResolvingAgent(wt.cwd, "ours")))
+            self.assertEqual(wt("rev-parse", "HEAD^2"), wt("rev-parse", "main"))
+
+    def test_merge_step_gives_up_on_leftover_markers(self):
+        self.diverge()
+        with worktree(self.repo) as wt:
+            head = wt("rev-parse", "HEAD")
+            agent = ResolvingAgent(wt.cwd, None)
+            with self.assertRaisesRegex(ShipError, "still unresolved after 2 rounds: a"):
+                merge_step(self.make_run(wt, agent))
+            self.assertEqual(len(agent.fixes), 3)
+            self.assertEqual(wt("rev-parse", "HEAD"), head)
+            self.assertTrue(wt.is_clean())
+
+    def test_merge_conflicts_fails_on_unknown_rev(self):
+        with worktree(self.repo) as wt:
+            with self.assertRaises(ShipError):
+                wt.merge_conflicts("nope")
+            self.assertTrue(wt.is_clean())
+
+    def test_ci_resolves_conflicts_and_publishes(self):
+        self.diverge()
+        pending = Check(name="build", state="pending", ref="")
+        passed = Check(name="build", state="passed", ref="")
+        published = []
+        with worktree(self.repo) as wt:
+            host = FakeHost([[pending], [pending], [passed]], conflicts=True)
+            publish = lambda: (published.append(True), setattr(host, "conflicts", False))
+            ci_step(self.make_run(wt, ResolvingAgent(wt.cwd, "both")), host, "b", publish, 600, FakeClock())
+            self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["chore: merge origin/main and resolve conflicts"])
+            self.assertEqual(published, [True])
+
+    def test_ci_stops_when_host_conflicts_do_not_reproduce(self):
+        pending = Check(name="build", state="pending", ref="")
+        with worktree(self.repo) as wt:
+            host = FakeHost([[pending]] * 100, conflicts=True)
+            with self.assertRaisesRegex(ShipError, "merges cleanly here"):
                 ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", lambda: None, 600, FakeClock())
 
     def test_worktree_is_removed(self):

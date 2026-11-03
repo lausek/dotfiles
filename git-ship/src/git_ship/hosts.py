@@ -18,6 +18,10 @@ class Host(Protocol):
         """Links the ticket so merging the PR closes it."""
         ...
 
+    def has_conflicts(self, branch: str) -> bool:
+        """The branch's PR has merge conflicts with its base, so its CI won't run."""
+        ...
+
     def checks(self, branch: str, head: str) -> list[Check]:
         """CI checks of the branch's PR. Checks that ran on another commit than `head` are pending."""
         ...
@@ -43,6 +47,9 @@ class GitHub:
         link = f"\n\nCloses #{ticket.id}" if ticket else ""
         body = fit(pr.body, self.MAX_BODY - len(link)) + link
         return self._gh("pr", "create", "--head", branch, "--base", base, "--title", pr.title, "--body", body)
+
+    def has_conflicts(self, branch: str) -> bool:
+        return self._gh("pr", "view", branch, "--json", "mergeable", "-q", ".mergeable") == "CONFLICTING"
 
     def checks(self, branch: str, head: str) -> list[Check]:
         pr = json.loads(self._gh("pr", "view", branch, "--json", "headRefOid,statusCheckRollup"))
@@ -112,6 +119,10 @@ class AzureDevOps:
                          "--title", pr.title, "--description", fit(pr.body, self.MAX_BODY), *link, "--query", "pullRequestId", "-o", "tsv")
         return self._web_url(int(pr_id))
 
+    def has_conflicts(self, branch: str) -> bool:
+        pr = self._find_pr(branch)
+        return pr is not None and pr["mergeStatus"] == "conflicts"
+
     def checks(self, branch: str, head: str) -> list[Check]:
         """Build policies of the PR. Other policies (reviewers, work items) are not CI."""
         pr = self._find_pr(branch)
@@ -160,7 +171,7 @@ class AzureDevOps:
     def _find_pr(self, branch: str) -> dict[str, Any] | None:
         return json.loads(self._az(
             "repos", "pr", "list", "--source-branch", branch, "--status", "active",
-            "--query", "[0].{id: pullRequestId, project: repository.project.name}", "-o", "json",
+            "--query", "[0].{id: pullRequestId, project: repository.project.name, mergeStatus: mergeStatus}", "-o", "json",
         ) or "null")
 
     def _web_url(self, pr_id: int) -> str:

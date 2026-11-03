@@ -3,7 +3,7 @@
 Validates the current branch in a disposable worktree, then pushes it, opens a PR on GitHub or Azure DevOps and watches CI.
 
 ```
-review -> fix -> checks -> fix -> push -> PR -> CI -> fix
+resolve conflicts -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix
 ```
 
 - The review runs in a fresh `claude -p` session that can only read. Findings are `auto-fix` (fixed and committed) or `ask-user` (you decide).
@@ -13,6 +13,7 @@ review -> fix -> checks -> fix -> push -> PR -> CI -> fix
 - CI of the PR is watched. Failing checks are handed to Claude with their logs, fixed, pushed and watched again.
 - The machine doesn't go to sleep while shipping, the same way `claude-awake` does it (`systemd-inhibit`).
 - Pushes never force. If you committed in the meantime, the push fails and nothing is lost.
+- PRs with merge conflicts get no CI. If the branch conflicts with the base, git-ship merges the base in and Claude resolves the conflicts (markers in diff3 style, so it sees the common ancestor). The merge commit then goes through the review and the checks like any other change. If the base moves into a conflict while CI is watched, the same happens and the merge is pushed. A branch that merges cleanly is left as it is.
 
 ## Install
 
