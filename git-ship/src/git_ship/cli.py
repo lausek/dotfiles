@@ -22,7 +22,7 @@ from .git import Git, worktree
 from .hosts import Host, detect_host
 from .memory import Memory
 from .models import Assessment, Change, Check, Detection, Finding, Ticket
-from .pipeline import Decide, Decision, Run, Target, ship_pipeline
+from .pipeline import Answer, Decide, Run, Target, numbered, ship_pipeline
 from .report import with_assessment
 from .shell import NeedsDecision, ShipError, run
 from .ui import PlainUi, Ui
@@ -36,9 +36,13 @@ def main() -> int:
         "-y", "--yes", action="store_true",
         help="don't ask: save detected checks right away, exit with 2 on findings that need a human decision",
     )
-    asks = parser.add_mutually_exclusive_group()
-    asks.add_argument("--fix-asks", action="store_true", help="fix findings that need a human decision too")
-    asks.add_argument("--keep-asks", action="store_true", help="keep findings that need a human decision as they are")
+    parser.add_argument(
+        "--answer", action="append", type=_answer, default=[], metavar="N=TEXT",
+        help="what to do about the finding [ask-user #N], in your words, or `keep` to keep it as it is. Repeatable",
+    )
+    parser.add_argument(
+        "--keep-asks", action="store_true", help="keep the findings that need a human decision and got no --answer",
+    )
     parser.add_argument("--ticket", type=_ticket_id, help="GitHub issue or Azure DevOps work item the change implements")
     parser.add_argument("--setup", action="store_true", help="detect the checks again")
     parser.add_argument(
@@ -83,13 +87,19 @@ def _interactive() -> bool:
 
 
 def _decider(args: argparse.Namespace, ui: Ui) -> Decide:
-    if args.fix_asks:
-        return lambda findings: "fix"
-    if args.keep_asks:
-        return lambda findings: "keep"
+    if args.answer or args.keep_asks:
+        given = dict(args.answer)
+        return lambda findings: given_answers(findings, given, args.keep_asks)
     if args.yes:
         return needs_decision
     return lambda findings: prompt_decision(ui, findings)
+
+
+def _answer(value: str) -> tuple[int, str]:
+    number, sep, text = value.partition("=")
+    if not sep or not number.strip().isdigit() or not text.strip():
+        raise argparse.ArgumentTypeError(f"expected N=TEXT, e.g. 1=migrate them, got {value!r}")
+    return int(number), text.strip()
 
 
 def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
@@ -210,31 +220,56 @@ def accept(question: str) -> bool:
     return True
 
 
-def prompt_decision(ui: Ui, findings: Sequence[Finding]) -> Decision:
+def prompt_decision(ui: Ui, findings: Sequence[Finding]) -> list[Answer]:
+    """Asks about each ask-user finding in turn. The answer is free text, handed to the fixer as it is."""
     asks = [finding for finding in findings if finding.needs_user]
-    auto_fixes = len(findings) - len(asks)
-    either_way = f", the {auto_fixes} auto-fix one(s) are fixed either way" if auto_fixes else ""
-    while True:
-        # The findings come with the question: the TUI takes its step list down while it asks.
-        answer = ui.ask(
-            f"{len(asks)} finding(s) need your decision{either_way}. "
-            "[f]ix them, [k]eep them as they are, show [d]etails, [a]bort? ",
-            details=[finding.tagged() for finding in findings],
-        )
-        match answer.strip().lower():
-            case "f":
-                return "fix"
-            case "k":
-                return "keep"
-            case "d":
-                ui.log("\n\n".join(finding.explained() for finding in findings))
-            case _:
-                raise ShipError("aborted")
+    # The findings come with each question: the TUI takes its step list down while it asks.
+    details = numbered(findings)
+    answers: list[Answer] = []
+    for number, finding in enumerate(asks, 1):
+        while True:
+            reply = ui.ask(
+                f"#{number} {finding.question or finding.summary} "
+                "Answer in your words, or [k]eep as is, show [d]etails, [a]bort: ",
+                details=details,
+            ).strip()
+            match reply.lower():
+                case "":
+                    continue
+                case "k":
+                    answers.append(None)
+                case "a":
+                    raise ShipError("aborted")
+                case "d":
+                    ui.log(finding.explained(number))
+                    continue
+                case _:
+                    answers.append(reply)
+            break
+    return answers
 
 
-def needs_decision(findings: Sequence[Finding]) -> Decision:
+def given_answers(findings: Sequence[Finding], given: dict[int, str], keep_rest: bool) -> list[Answer]:
+    """The answers from the command line. `keep` keeps a finding, as does --keep-asks for those without one."""
+    count = sum(finding.needs_user for finding in findings)
+    unknown = sorted(set(given) - set(range(1, count + 1)))
+    if unknown:
+        raise ShipError(f"no finding [ask-user #{unknown[0]}], there are {count}")
+    missing = [number for number in range(1, count + 1) if number not in given]
+    if missing and not keep_rest:
+        raise NeedsDecision(f"no answer for [ask-user {', '.join(f'#{n}' for n in missing)}] - add --answer or --keep-asks")
+    texts = [given.get(number, "keep") for number in range(1, count + 1)]
+    return [None if text.lower() == "keep" else text for text in texts]
+
+
+def needs_decision(findings: Sequence[Finding]) -> list[Answer]:
+    """Without a terminal, e.g. under the /ship skill: lists the questions in full for whoever relays them."""
     asks = [finding for finding in findings if finding.needs_user]
-    raise NeedsDecision(f"{len(asks)} finding(s) need a human decision - rerun with --fix-asks or --keep-asks")
+    questions = "\n\n".join(finding.explained(number) for number, finding in enumerate(asks, 1))
+    raise NeedsDecision(
+        f"{len(asks)} finding(s) need a human decision - rerun with --answer N=TEXT for each [ask-user #N], "
+        f"TEXT being what to do in the author's words or `keep`:\n\n{questions}"
+    )
 
 
 def _current_branch(repo: Git, config: Config) -> str:

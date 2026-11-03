@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
-from typing import Literal, NoReturn
+from typing import NoReturn
 
 from .agent import Agent
 from .git import Git
@@ -14,9 +14,10 @@ from .models import Assessment, Change, Check, Detection, Finding
 from .shell import ShipError
 from .ui import PlannedStep, Ui
 
-Decision = Literal["fix", "keep"]
-Decide = Callable[[Sequence[Finding]], Decision]
-"""Decides what to do with the ask-user findings among a review's findings. Raises to abort."""
+Answer = str | None
+"""What the author wants done about an ask-user finding, in their own words. None keeps it as it is."""
+Decide = Callable[[Sequence[Finding]], list[Answer]]
+"""Answers the ask-user findings among a review's findings, one per finding in their order. Raises to abort."""
 
 CI_POLL_SECONDS = 30
 CI_NO_CHECKS_GRACE_SECONDS = 180
@@ -217,7 +218,7 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         source = ["(the last run reviewed this commit already)"]
     # A review remembered from before you kept some of its findings still has them.
     open_findings = [finding for finding in review.findings if finding not in kept]
-    findings = [finding.tagged() for finding in open_findings]
+    findings = numbered(open_findings)
     run.ui.details(
         "review", [*source, f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])]
     )
@@ -227,7 +228,8 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         return assessment
 
     to_fix = select_fixes(open_findings, run.decide)
-    kept += [finding for finding in open_findings if finding not in to_fix]
+    fixed = [finding for finding, _ in to_fix]
+    kept += [finding for finding in open_findings if finding not in fixed]
     run.memory.remember_kept(kept)
     if not to_fix:
         run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
@@ -238,7 +240,7 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         problem="still findings",
         status=f"claude fixes {len(to_fix)} finding(s)",
         message="fix: address review findings",
-        instructions="\n".join(f"- {finding}" for finding in to_fix),
+        instructions="\n".join(_instruction(finding, answer) for finding, answer in to_fix),
         reason=f"fixed {len(to_fix)} review finding(s)",
     )
     raise AssertionError("unreachable")
@@ -252,11 +254,29 @@ def _review_key(run: Run) -> str:
     return f"{head} {merge_base} {ticket}".strip()
 
 
-def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[Finding]:
+def numbered(findings: Sequence[Finding]) -> list[str]:
+    """The findings in short, the ask-user ones numbered, so an answer can refer to them."""
+    asks = iter(range(1, len(findings) + 1))
+    return [finding.tagged(next(asks) if finding.needs_user else None) for finding in findings]
+
+
+def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[tuple[Finding, Answer]]:
+    """The findings to fix, each with the author's answer if it needed one. Unanswered ask-user findings are kept."""
     asks = [finding for finding in findings if finding.needs_user]
-    if asks and decide(findings) == "fix":
-        return list(findings)
-    return [finding for finding in findings if not finding.needs_user]
+    answers = dict(zip(asks, decide(findings))) if asks else {}
+    return [
+        (finding, answers.get(finding))
+        for finding in findings
+        if not finding.needs_user or answers.get(finding) is not None
+    ]
+
+
+def _instruction(finding: Finding, answer: Answer) -> str:
+    if answer is None:
+        return f"- {finding}"
+    return f"""- {finding}
+  The author was asked: {finding.question or "How should this be fixed?"}
+  The author answered, do what the answer says: {answer}"""
 
 
 def checks_step(run: Run, commands: Sequence[str]) -> None:

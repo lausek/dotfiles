@@ -21,7 +21,7 @@ LIVE_DETAIL_LINES = 6
 """Per step. The live list can't be taller than the terminal, the copy in the scrollback has them all."""
 MORE = "... "
 
-TAG = re.compile(r"\[([\w-]+)\] ")
+TAG = re.compile(r"\[([\w-]+)(?: #\d+)?\] ")
 """What a detail line is, e.g. `[auto-fix]`."""
 TAG_STYLES = {"auto-fix": "bold cyan", "ask-user": "bold yellow", "conflict": "bold red", "failed": "bold red"}
 

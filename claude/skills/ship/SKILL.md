@@ -36,11 +36,13 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 - any `warning:` line, verbatim. "the tests did not run" means nothing tested the change.
 - the commits git-ship added, including a `chore: merge origin/<base> and resolve conflicts` if it resolved conflicts. Ask the user to look at that resolution in the PR. git-ship puts them onto the local branch itself. If it says they are on `ship/<branch>` instead, tell the user, they have to merge them.
 
-**2 - needs a human decision.** The review found `[ask-user]` findings and stopped. Show the user these findings, then use AskUserQuestion:
-- "Fix them" -> rerun with `--fix-asks` added, in the background
-- "Keep them as they are" -> rerun with `--keep-asks` added, in the background
+**2 - needs a human decision.** The review found `[ask-user #N]` findings and stopped. The error lists each with its question (after the `→`), the location and the detail. Ask the user about each finding with AskUserQuestion, up to 4 per call, one question per finding:
+- the question: the finding's question as git-ship wrote it, with the short summary as context. Use the detail only to make the options concrete, the user decides without reading code.
+- the options: the choices the question names, then "Keep as is". The user can always answer in their own words via "Other".
 
-The rerun reuses the review it stopped on, so it decides about the same findings. If it stops with exit 2 once more, ask again. Never pick an option for the user.
+Then rerun in the background with one `--answer N=<answer>` per finding: the chosen option or the user's own words as they wrote them, `keep` for "Keep as is". Quote each argument for the shell.
+
+The rerun reuses the review it stopped on, so the numbers refer to the same findings. If it stops with exit 2 once more, ask again. Never answer for the user.
 
 **1 - failed.** Report the error from the output and stop. Don't retry or work around it on your own. Common cases:
 - "still findings after N fix rounds" / "still failing after N fix rounds": the fixer couldn't solve it. Show the remaining findings or failure.

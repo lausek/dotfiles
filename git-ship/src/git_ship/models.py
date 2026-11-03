@@ -22,16 +22,20 @@ class Finding:
         """In full, e.g. for the fixer."""
         return f"{self.file}:{self.line or '-'} - {self.summary} {self.detail}".rstrip()
 
-    def tagged(self) -> str:
-        """Short, with what to do about it in front, e.g. `[auto-fix] m.py:2 - off by one`.
-        The decision follows the summary, e.g. `[ask-user] m.py:5 - may raise → Catch it or let it crash?`"""
+    def tagged(self, number: int | None = None) -> str:
+        """Short, with what to do about it in front, e.g. `[auto-fix] m.py:2 - off by one`. The decision
+        follows the summary, e.g. `[ask-user #1] m.py:5 - may raise → Catch it or let it crash?`. The number
+        is what an answer refers to."""
         tag = "ask-user" if self.needs_user else "auto-fix"
+        if number is not None:
+            tag += f" #{number}"
         text = f"{self.summary} → {self.question}" if self.needs_user and self.question else self.summary
         return f"[{tag}] {Path(self.file).name}:{self.line or '-'} - {text}"
 
-    def explained(self) -> str:
+    def explained(self, number: int | None = None) -> str:
         """The short form, then where exactly and the detail, for a closer look before deciding."""
-        return "\n".join(part for part in (self.tagged(), f"{self.file}:{self.line or '-'}", self.detail) if part)
+        parts = (self.tagged(number), f"{self.file}:{self.line or '-'}", self.detail)
+        return "\n".join(part for part in parts if part)
 
 
 @dataclass(frozen=True)

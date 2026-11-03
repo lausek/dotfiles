@@ -9,7 +9,13 @@ from pathlib import Path
 
 from git_ship import shell
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import keep_fixes, needs_decision, prompt_decision, untested_warning
+from git_ship.cli import (
+    given_answers,
+    keep_fixes,
+    needs_decision,
+    prompt_decision,
+    untested_warning,
+)
 from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
@@ -121,11 +127,12 @@ class FakeClock(Clock):
         self.time += seconds
 
 
-def answer(decision=None):
-    def decide(asks):
-        if decision is None:
-            raise AssertionError(f"unexpected decision on {asks}")
-        return decision
+def answer(reply=None):
+    """Gives `reply` to every ask-user finding, `keep` keeps them."""
+    def decide(findings):
+        if reply is None:
+            raise AssertionError(f"unexpected decision on {findings}")
+        return [None if reply == "keep" else reply] * sum(finding.needs_user for finding in findings)
     return decide
 
 
@@ -192,6 +199,13 @@ class PipelineTest(unittest.TestCase):
             self.ship(wt, agent, decide=answer("keep"))
             self.assertEqual(agent.kept_per_round[1], [DECISION])
             self.assertNotIn("should this raise", agent.fixes[0])
+
+    def test_the_fixer_gets_the_authors_answer(self):
+        with worktree(self.repo) as wt:
+            agent = FakeAgent(wt.cwd, [[DECISION]])
+            self.ship(wt, agent, decide=answer("let it crash"))
+            self.assertIn("should this raise?", agent.fixes[0])
+            self.assertIn("The author answered, do what the answer says: let it crash", agent.fixes[0])
 
     def test_gives_up_after_rounds(self):
         with worktree(self.repo) as wt:
@@ -444,17 +458,36 @@ class ResolveChecksTest(unittest.TestCase):
 
 class SelectFixesTest(unittest.TestCase):
     def test_only_auto_fixes_without_asking(self):
-        self.assertEqual(select_fixes([BUG], answer()), [BUG])
+        self.assertEqual(select_fixes([BUG], answer()), [(BUG, None)])
 
-    def test_user_can_include_decisions(self):
-        self.assertEqual(select_fixes([BUG, DECISION], answer("fix")), [BUG, DECISION])
+    def test_answered_decisions_are_fixed_with_the_answer(self):
+        self.assertEqual(select_fixes([BUG, DECISION], answer("raise")), [(BUG, None), (DECISION, "raise")])
 
     def test_user_can_keep_decisions(self):
-        self.assertEqual(select_fixes([BUG, DECISION], answer("keep")), [BUG])
+        self.assertEqual(select_fixes([BUG, DECISION], answer("keep")), [(BUG, None)])
 
-    def test_needs_decision_exits_with_2(self):
-        with self.assertRaises(NeedsDecision):
-            select_fixes([DECISION], needs_decision)
+    def test_needs_decision_exits_with_2_and_lists_the_questions(self):
+        finding = Finding(file="a/m.py", line=5, summary="may crash", needs_user=True, detail="d", question="Catch it?")
+        with self.assertRaises(NeedsDecision) as raised:
+            select_fixes([BUG, finding], needs_decision)
+        self.assertIn("[ask-user #1] m.py:5 - may crash → Catch it?\na/m.py:5\nd", str(raised.exception))
+
+
+class GivenAnswersTest(unittest.TestCase):
+    OTHER = Finding(file="m.py", line=9, summary="other", needs_user=True)
+
+    def test_answers_by_number_and_keep(self):
+        given = {1: "keep", 2: "migrate them"}
+        self.assertEqual(given_answers([DECISION, BUG, self.OTHER], given, False), [None, "migrate them"])
+
+    def test_missing_answers_need_a_decision_unless_the_rest_is_kept(self):
+        with self.assertRaisesRegex(NeedsDecision, "#2"):
+            given_answers([DECISION, self.OTHER], {1: "x"}, False)
+        self.assertEqual(given_answers([DECISION, self.OTHER], {1: "x"}, True), ["x", None])
+
+    def test_unknown_number_fails(self):
+        with self.assertRaisesRegex(ShipError, "no finding \\[ask-user #3\\]"):
+            given_answers([DECISION], {3: "x"}, True)
 
 
 class HelpersTest(unittest.TestCase):
@@ -612,9 +645,20 @@ class PromptDecisionTest(unittest.TestCase):
                 return "k"
 
         ui = Asking()
-        self.assertEqual(prompt_decision(ui, [BUG, DECISION]), "keep")
-        self.assertEqual(ui.details, ["[auto-fix] m.py:2 - off by one", "[ask-user] m.py:5 - should this raise?"])
-        self.assertIn("1 finding(s) need your decision, the 1 auto-fix one(s) are fixed either way", ui.question)
+        self.assertEqual(prompt_decision(ui, [BUG, DECISION]), [None])
+        self.assertEqual(ui.details, ["[auto-fix] m.py:2 - off by one", "[ask-user #1] m.py:5 - should this raise?"])
+        self.assertTrue(ui.question.startswith("#1 should this raise? Answer in your words"))
+
+    def test_free_text_answers_each_finding(self):
+        class Asking(PlainUi):
+            def __init__(self):
+                self.answers = ["", "  let it crash ", "k"]
+
+            def ask(self, question: str, details=()) -> str:
+                return self.answers.pop(0)
+
+        other = Finding(file="m.py", line=9, summary="other", needs_user=True)
+        self.assertEqual(prompt_decision(Asking(), [DECISION, BUG, other]), ["let it crash", None])
 
     def test_shows_the_short_form_and_the_detail_on_request(self):
         finding = Finding(
@@ -628,7 +672,7 @@ class PromptDecisionTest(unittest.TestCase):
 
         class Asking(PlainUi):
             def __init__(self):
-                self.answers = ["d", "f"]
+                self.answers = ["d", "migrate"]
                 self.details: list[list[str]] = []
                 self.logged: list[str] = []
 
@@ -640,16 +684,16 @@ class PromptDecisionTest(unittest.TestCase):
                 self.logged.append(text)
 
         ui = Asking()
-        self.assertEqual(prompt_decision(ui, [finding]), "fix")
-        short = "[ask-user] m.py:5 - Old chats lose their visuals → Migrate them, or accept it?"
+        self.assertEqual(prompt_decision(ui, [finding]), ["migrate"])
+        short = "[ask-user #1] m.py:5 - Old chats lose their visuals → Migrate them, or accept it?"
         self.assertEqual(ui.details, [[short], [short]])
         self.assertEqual(ui.logged, [f"{short}\nsrc/deep/m.py:5\n{finding.detail}"])
         self.assertIn(finding.detail, str(finding), "the fixer gets the detail")
 
-    def test_anything_else_aborts(self):
+    def test_a_aborts(self):
         class Asking(PlainUi):
             def ask(self, question: str, details=()) -> str:
-                return "x"
+                return "a"
 
         with self.assertRaises(ShipError):
             prompt_decision(Asking(), [DECISION])
