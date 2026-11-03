@@ -7,6 +7,9 @@ from .models import Change, Detection, Finding, PullRequest, Review
 from .shell import ShipError, run
 
 READ_ONLY_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+
+OPINIONS = Path.home() / ".claude" / "OPINIONS.md"
+"""The author's views on how code should be. The reviewer reads them when they exist."""
 EDIT_TOOLS = "Read,Grep,Glob,Edit,Write"
 
 FINDINGS_SCHEMA = {
@@ -111,7 +114,15 @@ report that as an 'ask-user' finding.
             prompt += "\n\nThe author decided to keep these as they are, don't report them again:\n"
             prompt += _bullets(kept)
 
-        output = self._structured(prompt, FINDINGS_SCHEMA, READ_ONLY_TOOLS)
+        tools = READ_ONLY_TOOLS
+        if OPINIONS.is_file():
+            prompt += f"""
+
+Before reviewing, read the author's opinions on how code should be from `{OPINIONS}`.
+Report code in the change that goes against them as 'ask-user' findings."""
+            tools += "," + _read_only(OPINIONS)
+
+        output = self._structured(prompt, FINDINGS_SCHEMA, tools)
         findings = [
             Finding(
                 file=item["file"],
@@ -155,6 +166,13 @@ Stay under {PR_BODY_TARGET} characters."""
         if response.get("is_error") or output is None:
             raise ShipError(f"claude returned no structured output: {response.get('result')}")
         return output
+
+
+def _read_only(path: Path) -> str:
+    """Permission to read this one file outside the repo, also through a symlink.
+    `//` marks an absolute path in permission rules."""
+    paths = dict.fromkeys([path, path.resolve()])
+    return ",".join(f"Read(/{file})" for file in paths)
 
 
 def _bullets(items: Sequence[object]) -> str:

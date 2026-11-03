@@ -652,5 +652,19 @@ class MemoryTest(unittest.TestCase):
         self.assertIsNone(memory.review("k"))
 
 
+
+class ReadOnlyTest(unittest.TestCase):
+    def test_allows_reading_the_file_and_its_symlink_target(self):
+        from git_ship.agent import _read_only
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "real.md"
+            target.write_text("x")
+            link = Path(tmp) / "OPINIONS.md"
+            link.symlink_to(target)
+            self.assertEqual(_read_only(link), f"Read(/{link}),Read(/{target.resolve()})")
+            self.assertEqual(_read_only(target), f"Read(/{target.resolve()})")
+
+
 if __name__ == "__main__":
     unittest.main()

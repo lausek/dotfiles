@@ -14,6 +14,7 @@ commit git-ship pushes was reviewed and checked, including fixes for failing che
 - The commits git-ship adds go onto your local branch, also when it fails or you abort it. A rerun goes on from there.
   If the branch moved in the meantime or uncommitted changes are in the way, they go to `ship/<branch>` instead.
 - A rerun on the same commit reuses the last review instead of reviewing again, so you decide about the same findings.
+- If `~/.claude/OPINIONS.md` exists, the reviewer reads it and reports code that goes against those opinions as `ask-user`.
 - The review also rates how carefully a human has to look at the PR (low / medium / high risk). That rating heads the PR description.
 - A failing check is handed to Claude to fix.
 - CI of the PR is watched. Failing checks are handed to Claude with their logs.
