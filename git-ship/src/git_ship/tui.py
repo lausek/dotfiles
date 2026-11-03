@@ -34,10 +34,7 @@ class TerminalUi:
         self._spinners: dict[str, Spinner] = {}
         # The refresh thread draws while the pipeline changes the steps.
         self._lock = threading.Lock()
-        # Transient, so it can be taken down for a question without leaving a copy behind.
-        self._live = Live(
-            get_renderable=self._render, console=self.console, refresh_per_second=8, transient=True
-        )
+        self._live = self._new_live()
 
     @contextmanager
     def session(self) -> Iterator[None]:
@@ -94,7 +91,13 @@ class TerminalUi:
         try:
             return self.console.input(Text(question, style="bold"))
         finally:
+            # A new one: a restarted Live still knows the height of its old area and would draw over the question.
+            self._live = self._new_live()
             self._live.start()
+
+    def _new_live(self) -> Live:
+        # Transient, so it can be taken down for a question without leaving a copy behind.
+        return Live(get_renderable=self._render, console=self.console, refresh_per_second=8, transient=True)
 
     def _render(self, all_details: bool = False) -> RenderableType:
         """One row per step. A step's details go under it on their own lines, between table segments

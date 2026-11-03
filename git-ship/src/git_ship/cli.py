@@ -186,7 +186,11 @@ def accept(question: str) -> bool:
 
 
 def prompt_decision(ui: Ui, asks: Sequence[Finding]) -> Decision:
-    answer = ui.ask(f"{len(asks)} ask-user finding(s): [f]ix them, [k]eep them as they are, [a]bort? ")
+    # The question lists them itself: the TUI takes its step list down while it asks.
+    findings = "\n".join(f"  - {finding}" for finding in asks)
+    answer = ui.ask(
+        f"{len(asks)} finding(s) need your decision:\n{findings}\n[f]ix them, [k]eep them as they are, [a]bort? "
+    )
     match answer.strip().lower():
         case "f":
             return "fix"

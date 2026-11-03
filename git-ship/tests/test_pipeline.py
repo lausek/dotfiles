@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision, untested_warning
+from git_ship.cli import needs_decision, prompt_decision, untested_warning
 from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
@@ -524,6 +524,19 @@ class TerminalUiTest(unittest.TestCase):
         self.assertIn("↻ review", text)
         self.assertIn("attempt 2/4 - fixed 1 review finding(s)", text)
         self.assertIn("· review", text.split("attempt 2/4")[1])
+
+
+
+class PromptDecisionTest(unittest.TestCase):
+    def test_question_lists_the_findings(self):
+        class Asking(PlainUi):
+            def ask(self, question: str) -> str:
+                self.question = question
+                return "k"
+
+        ui = Asking()
+        self.assertEqual(prompt_decision(ui, [DECISION]), "keep")
+        self.assertIn("m.py:5 - should this raise?", ui.question)
 
 
 if __name__ == "__main__":
