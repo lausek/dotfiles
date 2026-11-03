@@ -585,6 +585,11 @@ class TerminalUiTest(unittest.TestCase):
         self.assertEqual(lines[first + 1][text_column:text_column + 4], "word")
         self.assertTrue(any(line.startswith("    [ask-user] short") for line in lines))
 
+    def test_counts_the_lines_a_wrapped_answer_takes(self):
+        from git_ship.tui import _wrapped_lines
+
+        self.assertEqual([_wrapped_lines(cells, 60) for cells in (0, 59, 60, 61, 121)], [1, 1, 1, 2, 3])
+
     def test_restart_shows_the_attempt_and_resets_the_steps(self):
         ui = self.make_ui()
         ui.start("review", "review")

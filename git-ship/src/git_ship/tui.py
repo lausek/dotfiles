@@ -8,6 +8,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
+from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.spinner import Spinner
@@ -93,15 +94,32 @@ class TerminalUi:
         self.console.print(Text(text))
 
     def ask(self, question: str, details: Sequence[str] = ()) -> str:
+        """Once answered, the question is erased again, so the step list is back in focus. The answer shows
+        in the steps, e.g. as kept findings under the review."""
         self._live.stop()
         try:
+            lines = 0
             if details:
-                self.console.print(_details(list(details), all_details=True))
-            return self.console.input(_question(question))
+                about = _details(list(details), all_details=True)
+                lines += len(self.console.render_lines(about, pad=False))
+                self.console.print(about)
+            prompt = _question(question)
+            answer = self.console.input(prompt)
+            lines += _wrapped_lines(prompt.cell_len + cell_len(answer), self.console.width)
+            self._erase(lines)
+            return answer
         finally:
             # A new one: a restarted Live still knows the height of its old area and would draw over the question.
             self._live = self._new_live()
             self._live.start()
+
+    def _erase(self, lines: int) -> None:
+        """Erases the last `lines` lines printed. Those that scrolled out of the screen stay."""
+        if not self.console.is_terminal or lines <= 0:
+            return
+        # To the start of the line `lines` up, then clear everything below.
+        self.console.file.write(f"\x1b[{min(lines, self.console.height)}F\x1b[J")
+        self.console.file.flush()
 
     def _new_live(self) -> Live:
         # Transient, so it can be taken down for a question without leaving a copy behind.
@@ -168,6 +186,11 @@ def _detail(line: str, all_details: bool) -> Table:
         table.add_column(ratio=1, overflow=overflow, no_wrap=not all_details)
         table.add_row("", Text(line, style="dim" if line.startswith(MORE) else ""))
     return table
+
+
+def _wrapped_lines(cells: int, width: int) -> int:
+    """How many lines a line of `cells` takes in a terminal `width` wide, with the Enter after it."""
+    return max(1, -(-cells // width))
 
 
 def _question(question: str) -> Text:
