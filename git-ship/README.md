@@ -10,7 +10,10 @@ Whenever a step fixes something, the fix is committed and the pipeline starts ov
 commit git-ship pushes was reviewed and checked, including fixes for failing checks and CI.
 
 - The review runs in a fresh `claude -p` session that can only read. Findings are `auto-fix` (fixed and committed) or `ask-user` (you decide).
-- Findings you choose to keep are passed to the next reviews, so they aren't reported again.
+- Findings you choose to keep are passed to the next reviews, so they aren't reported again. This holds across runs too.
+- The commits git-ship adds go onto your local branch, also when it fails or you abort it. A rerun goes on from there.
+  If the branch moved in the meantime or uncommitted changes are in the way, they go to `ship/<branch>` instead.
+- A rerun on the same commit reuses the last review instead of reviewing again, so you decide about the same findings.
 - The review also rates how carefully a human has to look at the PR (low / medium / high risk). That rating heads the PR description.
 - A failing check is handed to Claude to fix.
 - CI of the PR is watched. Failing checks are handed to Claude with their logs.
@@ -57,7 +60,10 @@ If the detected commands differ from the saved ones, you are asked before they a
 git ship --setup    # detect the checks again
 ```
 
-`.git/ship.json` is per clone and never committed. You can edit it, optional keys:
+`.git/ship.json` is per clone and never committed. What git-ship remembers between runs (the last review and the findings
+you kept, per branch) is in `.git/ship-state.json` next to it. Delete that to start from scratch.
+
+You can edit `.git/ship.json`, optional keys:
 
 ```json
 {

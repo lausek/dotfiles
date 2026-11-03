@@ -7,10 +7,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision, prompt_decision, untested_warning
+from git_ship.cli import keep_fixes, needs_decision, prompt_decision, untested_warning
 from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
+from git_ship.memory import Memory
 from git_ship.models import (
     Assessment,
     Change,
@@ -145,7 +146,13 @@ class PipelineTest(unittest.TestCase):
 
     def make_run(self, wt: Git, agent: FakeAgent, decide=None) -> Run:
         change = Change("HEAD~1..HEAD", None)
-        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main", ui=PlainUi())
+        return Run(
+            worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main", ui=PlainUi(),
+            memory=self.memory(),
+        )
+
+    def memory(self) -> Memory:
+        return Memory(self.repo.cwd / ".git" / "ship-state.json", "feature")
 
     def diverge(self, ours: str = "ours", theirs: str = "theirs"):
         """Puts the repo on a branch whose change to `a` conflicts with main's."""
@@ -206,6 +213,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_review_returns_risk_and_kept_findings(self):
         with worktree(self.repo) as wt:
+            wt("fetch", "-q", "origin", "main")
             agent = FakeAgent(wt.cwd, [[DECISION]])
             assessment = review_step(self.make_run(wt, agent, decide=answer("keep")), [])
             self.assertEqual(assessment, Assessment(risk="medium", risk_rationale="touches m.py", kept=[DECISION]))
@@ -309,6 +317,54 @@ class PipelineTest(unittest.TestCase):
             host = FakeHost([[pending]] * 100, conflicts=True)
             with self.assertRaisesRegex(ShipError, "merges cleanly here"):
                 self.ship(wt, FakeAgent(wt.cwd, []), host=host)
+
+    def test_rerun_on_the_same_commit_reuses_the_review(self):
+        with worktree(self.repo) as wt:
+            agent = FakeAgent(wt.cwd, [[DECISION]])
+            with self.assertRaisesRegex(ShipError, "aborted"):
+                self.ship(wt, agent, decide=lambda asks: (_ for _ in ()).throw(ShipError("aborted")))
+            self.ship(wt, agent, decide=answer("keep"))
+            self.assertEqual(len(agent.kept_per_round), 1)
+
+    def test_kept_findings_are_remembered_across_runs(self):
+        with worktree(self.repo) as wt:
+            self.ship(wt, FakeAgent(wt.cwd, [[DECISION]]), decide=answer("keep"))
+            (wt.cwd / "new").write_text("new")
+            wt("add", "-A")
+            wt("commit", "-qm", "new")
+            agent = FakeAgent(wt.cwd, [[DECISION]])
+            self.ship(wt, agent)  # would fail on being asked again
+            self.assertEqual(agent.kept_per_round, [[DECISION]])
+
+    def test_fixes_go_onto_the_branch(self):
+        self.repo("checkout", "-q", "-b", "feature")
+        start = self.repo("rev-parse", "HEAD")
+        with worktree(self.repo) as wt:
+            (wt.cwd / "fix").write_text("fix")
+            wt("add", "-A")
+            wt("commit", "-qm", "fix: x")
+            self.assertEqual(keep_fixes(self.repo, "feature", start, wt("rev-parse", "HEAD")), "ship added 1 commit(s) to feature")
+            self.assertEqual(self.repo("rev-parse", "HEAD"), wt("rev-parse", "HEAD"))
+            self.assertTrue((self.repo.cwd / "fix").exists())
+
+    def test_fixes_go_aside_when_the_branch_moved(self):
+        self.repo("checkout", "-q", "-b", "feature")
+        start = self.repo("rev-parse", "HEAD")
+        with worktree(self.repo) as wt:
+            (wt.cwd / "fix").write_text("fix")
+            wt("add", "-A")
+            wt("commit", "-qm", "fix: x")
+            (self.repo.cwd / "mine").write_text("mine")
+            self.repo("add", "-A")
+            self.repo("commit", "-qm", "mine")
+            message = keep_fixes(self.repo, "feature", start, wt("rev-parse", "HEAD"))
+            self.assertIn("they are on ship/feature", message.lower())
+            self.assertEqual(self.repo("rev-parse", "ship/feature"), wt("rev-parse", "HEAD"))
+            self.assertEqual(self.repo.subjects("HEAD~1..HEAD"), ["mine"])
+
+    def test_nothing_to_keep_without_fixes(self):
+        start = self.repo("rev-parse", "HEAD")
+        self.assertIsNone(keep_fixes(self.repo, "main", start, start))
 
     def test_worktree_is_removed(self):
         with worktree(self.repo) as wt:
@@ -537,6 +593,43 @@ class PromptDecisionTest(unittest.TestCase):
         ui = Asking()
         self.assertEqual(prompt_decision(ui, [DECISION]), "keep")
         self.assertIn("m.py:5 - should this raise?", ui.question)
+
+
+
+class MemoryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "ship-state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_remembers_the_last_review_of_a_commit(self):
+        review = Review(findings=[BUG, DECISION], risk="low", risk_rationale="small")
+        Memory(self.path, "a").remember_review("sha1", review)
+        self.assertEqual(Memory(self.path, "a").review("sha1"), review)
+        self.assertIsNone(Memory(self.path, "a").review("sha2"))
+        self.assertIsNone(Memory(self.path, "b").review("sha1"))
+
+    def test_remembers_kept_findings_per_branch(self):
+        Memory(self.path, "a").remember_kept([DECISION])
+        self.assertEqual(Memory(self.path, "a").kept(), [DECISION])
+        self.assertEqual(Memory(self.path, "b").kept(), [])
+
+    def test_forgets_branches_that_are_gone(self):
+        Memory(self.path, "gone").remember_kept([DECISION])
+        Memory(self.path, "a").forget_other_branches(["main"])
+        self.assertEqual(Memory(self.path, "gone").kept(), [])
+
+    def test_starts_from_scratch_on_a_broken_file(self):
+        self.path.write_text("{nope")
+        memory = Memory(self.path, "a")
+        self.assertEqual(memory.kept(), [])
+        memory.remember_kept([BUG])
+        self.assertEqual(memory.kept(), [BUG])
+        self.path.write_text(json.dumps({"version": 1, "branches": {"a": {"kept": [{"file": 1}], "review": {"key": "k"}}}}))
+        self.assertEqual(memory.kept(), [])
+        self.assertIsNone(memory.review("k"))
 
 
 if __name__ == "__main__":

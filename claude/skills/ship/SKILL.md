@@ -34,13 +34,13 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 - the PR link and the risk line (`risk: low|medium|high - ...` from the last review)
 - the checks it detected, if a `detect checks` section shows up in the output (they were saved to `.git/ship.json`)
 - any `warning:` line, verbatim. "the tests did not run" means nothing tested the change.
-- the commits git-ship added, including a `chore: merge origin/<base> and resolve conflicts` if it resolved conflicts. Ask the user to look at that resolution in the PR. If it added any, run `git pull --ff-only` on the branch so the local branch has them.
+- the commits git-ship added, including a `chore: merge origin/<base> and resolve conflicts` if it resolved conflicts. Ask the user to look at that resolution in the PR. git-ship puts them onto the local branch itself. If it says they are on `ship/<branch>` instead, tell the user, they have to merge them.
 
 **2 - needs a human decision.** The review found `[ask-user]` findings and stopped. Show the user these findings, then use AskUserQuestion:
 - "Fix them" -> rerun with `--fix-asks` added, in the background
 - "Keep them as they are" -> rerun with `--keep-asks` added, in the background
 
-The rerun reviews again from scratch. If it stops with exit 2 once more, ask again. Never pick an option for the user.
+The rerun reuses the review it stopped on, so it decides about the same findings. If it stops with exit 2 once more, ask again. Never pick an option for the user.
 
 **1 - failed.** Report the error from the output and stop. Don't retry or work around it on your own. Common cases:
 - "still findings after N fix rounds" / "still failing after N fix rounds": the fixer couldn't solve it. Show the remaining findings or failure.

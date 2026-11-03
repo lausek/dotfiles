@@ -9,6 +9,7 @@ from typing import Literal, NoReturn
 from .agent import Agent
 from .git import Git
 from .hosts import Host
+from .memory import Memory
 from .models import Assessment, Change, Check, Detection, Finding
 from .shell import ShipError
 from .ui import PlannedStep, Ui
@@ -50,6 +51,8 @@ class Run:
     base: str
     """Branch the PR merges into, e.g. 'main'."""
     ui: Ui
+    memory: Memory
+    """What earlier runs on this branch found and decided."""
     attempt: int = 1
 
     @property
@@ -90,7 +93,7 @@ class Shipped:
 def ship_pipeline(run: Run, target: Target, clock: Clock = SYSTEM_CLOCK) -> Shipped:
     """merge -> detect checks -> review -> checks -> push -> PR -> CI. A step that fixes something commits
     the fix and starts the pipeline over from the top."""
-    kept: list[Finding] = []
+    kept = run.memory.kept()
     restart: Restart | None = None
     run.ui.plan(plan(run.base, target.branch, checks=None))
     for attempt in count(1):
@@ -203,17 +206,29 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
     """Reviews the full change. Findings to fix are fixed, then the pipeline starts over.
     Findings the author keeps are added to `kept`, so later reviews don't report them again."""
     run.ui.start("review", "review")
-    run.ui.status("claude reviews the change")
-    review = run.agent.review(run.change, kept)
-    findings = [f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}" for finding in review.findings]
-    run.ui.details("review", [f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])])
+    key = _review_key(run)
+    review = run.memory.review(key)
+    if review is None:
+        run.ui.status("claude reviews the change")
+        review = run.agent.review(run.change, kept)
+        run.memory.remember_review(key, review)
+        source = []
+    else:
+        source = ["(the last run reviewed this commit already)"]
+    # A review remembered from before you kept some of its findings still has them.
+    open_findings = [finding for finding in review.findings if finding not in kept]
+    findings = [f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}" for finding in open_findings]
+    run.ui.details(
+        "review", [*source, f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])]
+    )
     assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
-    if not review.findings:
+    if not open_findings:
         run.ui.done("review", f"risk: {review.risk}")
         return assessment
 
-    to_fix = select_fixes(review.findings, run.decide)
-    kept += [finding for finding in review.findings if finding not in to_fix]
+    to_fix = select_fixes(open_findings, run.decide)
+    kept += [finding for finding in open_findings if finding not in to_fix]
+    run.memory.remember_kept(kept)
     if not to_fix:
         run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
         return assessment
@@ -227,6 +242,14 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         reason=f"fixed {len(to_fix)} review finding(s)",
     )
     raise AssertionError("unreachable")
+
+
+def _review_key(run: Run) -> str:
+    """What the review depends on: the commit, where it meets the base and the ticket."""
+    head = run.worktree("rev-parse", "HEAD")
+    merge_base = run.worktree("merge-base", "HEAD", f"origin/{run.base}")
+    ticket = run.change.ticket.id if run.change.ticket else ""
+    return f"{head} {merge_base} {ticket}".strip()
 
 
 def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[Finding]:

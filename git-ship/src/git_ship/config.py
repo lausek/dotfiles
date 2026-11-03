@@ -5,7 +5,7 @@
       "sources": {"package.json": "<sha256>"},            re-detects when these change
       "detection": 2,                                     re-detects when the detection rules change
       "base": "main",                                     optional, default: origin/HEAD
-      "rounds": 3,                                        optional, fix attempts per step
+      "rounds": 3,                                        optional, how often to fix and start over
       "ci_timeout_minutes": 60                            optional, 0 disables watching CI
     }
 """

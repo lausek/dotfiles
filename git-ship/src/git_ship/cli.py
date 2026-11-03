@@ -20,6 +20,7 @@ from .checks import Approve, resolve_checks
 from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
 from .hosts import Host, detect_host
+from .memory import Memory
 from .models import Assessment, Change, Check, Detection, Finding, Ticket
 from .pipeline import Decide, Decision, Run, Target, ship_pipeline
 from .report import with_assessment
@@ -107,11 +108,14 @@ def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: st
     # Three dots: the diff from where the branch last met the base, so a merge of the base doesn't show up in it.
     change = Change(diff_range=f"origin/{config.base}...HEAD", ticket=_fetch_ticket(host, ticket_id))
 
+    memory = Memory(config_file.with_name("ship-state.json"), branch)
+    memory.forget_other_branches(repo("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines())
+
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
         validation = Run(
             worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base,
-            ui=ui,
+            ui=ui, memory=memory,
         )
         target = Target(
             branch=branch,
@@ -120,19 +124,40 @@ def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: st
             resolve_checks=lambda: resolve_checks(config_file, wt.cwd, validation.agent, approve, redetect, ui),
             open_pr=lambda assessment: open_pr(ui, host, validation, assessment, branch, config.base),
         )
-        with ui.session():
-            shipped = ship_pipeline(validation, target)
+        try:
+            with ui.session():
+                shipped = ship_pipeline(validation, target)
+        finally:
+            # Also when it fails or you abort it, so a rerun goes on from the fixes instead of redoing them.
+            # After the session, so it shows below the TUI's steps.
+            kept_fixes = keep_fixes(repo, branch, start, wt("rev-parse", "HEAD"))
+            if kept_fixes:
+                print(f"\n{kept_fixes}")
 
-        # After the session, so they show below the TUI's steps.
         if host is None:
             print(f"unknown host for {remote_url} - pushed, open the PR yourself")
         warning = untested_warning(shipped.detection, host, config, shipped.ci_checks)
         if warning:
             print(f"\nwarning: {warning}", file=sys.stderr)
 
-        fixes = wt.subjects(f"{start}..HEAD")
-        if fixes:
-            print(f"\nship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
+
+def keep_fixes(repo: Git, branch: str, start: str, head: str) -> str | None:
+    """Puts the commits ship added in its worktree onto the branch. Only fast-forwards, and only while the
+    branch is still checked out where ship started. Otherwise they go to `ship/<branch>`.
+    Returns what it did, None if ship added nothing."""
+    added = repo.subjects(f"{start}..{head}")
+    if not added:
+        return None
+    summary = f"ship added {len(added)} commit(s)"
+    unmoved = repo.try_("symbolic-ref", "--short", "HEAD") == branch and repo("rev-parse", "HEAD") == start
+    if unmoved and repo.try_("merge", "--ff-only", "-q", head) is not None:
+        return f"{summary} to {branch}"
+    aside = f"ship/{branch}"
+    repo("branch", "-f", aside, head)
+    return (
+        f"{summary}, but they can't go onto {branch}: it moved or uncommitted changes are in the way. "
+        f"They are on {aside}, merge them yourself"
+    )
 
 
 def untested_warning(detection: Detection, host: Host | None, config: Config, ci_checks: list[Check]) -> str | None:
