@@ -7,6 +7,7 @@ On the first run, claude detects the local checks (install, lint, tests) and sav
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,15 +23,16 @@ from .pipeline import (
     Decide,
     Decision,
     Run,
+    check_key,
     checks_step,
     ci_step,
     merge_step,
     push,
     review_step,
-    step,
 )
 from .report import with_assessment
 from .shell import NeedsDecision, ShipError, run
+from .ui import PlainUi, PlannedStep, Ui
 
 
 def main() -> int:
@@ -46,11 +48,22 @@ def main() -> int:
     asks.add_argument("--keep-asks", action="store_true", help="keep findings that need a human decision as they are")
     parser.add_argument("--ticket", type=_ticket_id, help="GitHub issue or Azure DevOps work item the change implements")
     parser.add_argument("--setup", action="store_true", help="detect the checks again")
+    parser.add_argument(
+        "--plain", action="store_true",
+        help="log the steps as they happen instead of the live step list. Always the case off a terminal",
+    )
     args = parser.parse_args()
 
+    ui = _ui(args.plain)
     try:
         with stay_awake():
-            ship(decide=_decider(args), approve=accept if args.yes else confirm, redetect=args.setup, ticket_id=args.ticket)
+            ship(
+                ui=ui,
+                decide=_decider(args, ui),
+                approve=accept if args.yes else lambda question: confirm(ui, question),
+                redetect=args.setup,
+                ticket_id=args.ticket,
+            )
     except NeedsDecision as error:
         print(f"ship: {error}", file=sys.stderr)
         return 2
@@ -62,17 +75,31 @@ def main() -> int:
     return 0
 
 
-def _decider(args: argparse.Namespace) -> Decide:
+def _ui(plain: bool) -> Ui:
+    """The live step list only on an interactive terminal. Agents like the /ship skill and anything else
+    reading the output run without one and get the plain log."""
+    if not plain and _interactive():
+        from .tui import TerminalUi
+
+        return TerminalUi()
+    return PlainUi()
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+
+def _decider(args: argparse.Namespace, ui: Ui) -> Decide:
     if args.fix_asks:
         return lambda asks: "fix"
     if args.keep_asks:
         return lambda asks: "keep"
     if args.yes:
         return needs_decision
-    return prompt_decision
+    return lambda asks: prompt_decision(ui, asks)
 
 
-def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
+def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
     repo = Git(Path(run("git", "rev-parse", "--show-toplevel")))
     config_file = config_path(repo)
     config = load_config(repo, read_config_file(config_file))
@@ -90,27 +117,12 @@ def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None
 
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
-        validation = Run(
-            worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base
-        )
-        merge_step(validation)
-        detection = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect)
-        checks = detection.checks
-        assessment = review_step(validation)
-        checks_step(validation, checks)
+        with ui.session():
+            ci_checks, detection = _pipeline(ui, wt, change, config, config_file, approve, decide, redetect, host, branch)
 
-        step(f"push {branch}")
-        push(wt, branch)
-
-        ci_checks = []
+        # After the session, so they show below the TUI's steps.
         if host is None:
             print(f"unknown host for {remote_url} - pushed, open the PR yourself")
-        else:
-            step("pull request")
-            open_pr(host, validation, assessment, branch, config.base)
-            if config.ci_timeout_minutes > 0:
-                ci_checks = ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
-
         warning = untested_warning(detection, host, config, ci_checks)
         if warning:
             print(f"\nwarning: {warning}", file=sys.stderr)
@@ -118,6 +130,66 @@ def ship(decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None
         fixes = wt.subjects(f"{start}..HEAD")
         if fixes:
             print(f"\nship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
+
+
+def _pipeline(
+    ui: Ui,
+    wt: Git,
+    change: Change,
+    config: Config,
+    config_file: Path,
+    approve: Approve,
+    decide: Decide,
+    redetect: bool,
+    host: Host | None,
+    branch: str,
+) -> tuple[list[Check], Detection]:
+    validation = Run(
+        worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base, ui=ui
+    )
+    ui.plan(plan(config.base, branch, checks=None))
+    if not merge_step(validation):
+        ui.skip("merge", "no conflicts")
+    detection = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect, ui=ui)
+    ui.plan(plan(config.base, branch, detection.checks))
+    if not detection.checks:
+        ui.skip("checks", "none detected")
+    assessment = review_step(validation)
+    checks_step(validation, detection.checks)
+
+    ui.start("push", f"push {branch}")
+    push(wt, branch)
+    ui.done("push")
+
+    if host is None:
+        ui.skip("pr", "unknown host, open it yourself")
+        ui.skip("ci", "unknown host")
+        return [], detection
+
+    ui.start("pr", "pull request")
+    ui.done("pr", open_pr(ui, host, validation, assessment, branch, config.base))
+    if config.ci_timeout_minutes <= 0:
+        ui.skip("ci", "disabled (ci_timeout_minutes: 0)")
+        return [], detection
+    ci_checks = ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
+    return ci_checks, detection
+
+
+def plan(base: str, branch: str, checks: Sequence[str] | None) -> list[PlannedStep]:
+    """The steps ahead. The checks are one step until they are known."""
+    if checks:
+        check_steps = [PlannedStep(check_key(index), f"check: {command}") for index, command in enumerate(checks)]
+    else:
+        check_steps = [PlannedStep("checks", "checks")]
+    return [
+        PlannedStep("merge", f"merge origin/{base}"),
+        PlannedStep("detect", "detect checks"),
+        PlannedStep("review", "review"),
+        *check_steps,
+        PlannedStep("push", f"push {branch}"),
+        PlannedStep("pr", "pull request"),
+        PlannedStep("ci", "CI"),
+    ]
 
 
 def untested_warning(detection: Detection, host: Host | None, config: Config, ci_checks: list[Check]) -> str | None:
@@ -133,14 +205,18 @@ def untested_warning(detection: Detection, host: Host | None, config: Config, ci
     return f"the tests did not run - they are left to the PR's CI, but {reason}. Check that CI runs them."
 
 
-def open_pr(host: Host, validation: Run, assessment: Assessment, branch: str, base: str) -> None:
+def open_pr(ui: Ui, host: Host, validation: Run, assessment: Assessment, branch: str, base: str) -> str:
+    """Returns the PR's link."""
     existing = host.find_open_pr(branch)
     if existing:
-        print(f"PR already open: {existing}")
-        return
+        ui.log(f"PR already open: {existing}")
+        return existing
 
+    ui.status("claude writes the description")
     pr = validation.agent.write_pr(validation.change)
-    print(host.create_pr(branch, base, with_assessment(pr, assessment), validation.change.ticket))
+    url = host.create_pr(branch, base, with_assessment(pr, assessment), validation.change.ticket)
+    ui.log(url)
+    return url
 
 
 def _ticket_id(value: str) -> str:
@@ -158,16 +234,16 @@ def _fetch_ticket(host: Host | None, ticket_id: str | None) -> Ticket | None:
     return host.fetch_ticket(ticket_id)
 
 
-def confirm(question: str) -> bool:
-    return input(f"{question} [y/N] ").strip().lower() == "y"
+def confirm(ui: Ui, question: str) -> bool:
+    return ui.ask(f"{question} [y/N] ").strip().lower() == "y"
 
 
 def accept(question: str) -> bool:
     return True
 
 
-def prompt_decision(asks: Sequence[Finding]) -> Decision:
-    answer = input(f"{len(asks)} ask-user finding(s): [f]ix them, [k]eep them as they are, [a]bort? ")
+def prompt_decision(ui: Ui, asks: Sequence[Finding]) -> Decision:
+    answer = ui.ask(f"{len(asks)} ask-user finding(s): [f]ix them, [k]eep them as they are, [a]bort? ")
     match answer.strip().lower():
         case "f":
             return "fix"

@@ -5,8 +5,8 @@ from pathlib import Path
 from .agent import Agent
 from .config import read_config_file, write_config_file
 from .models import Detection
-from .pipeline import step
 from .shell import ShipError
+from .ui import Ui
 
 Approve = Callable[[str], bool]
 
@@ -14,7 +14,9 @@ DETECTION_VERSION = 2
 """Bump when the detection rules change, so saved checks are detected again."""
 
 
-def resolve_checks(config_file: Path, checkout: Path, agent: Agent, approve: Approve, force: bool) -> Detection:
+def resolve_checks(
+    config_file: Path, checkout: Path, agent: Agent, approve: Approve, force: bool, ui: Ui
+) -> Detection:
     """Returns the saved checks, or detects them again if the files they came from changed."""
     data = read_config_file(config_file)
     saved = data.get("checks")
@@ -23,14 +25,16 @@ def resolve_checks(config_file: Path, checkout: Path, agent: Agent, approve: App
         raise ShipError(f'"checks" in {config_file} must be a list of commands')
     current = data.get("detection") == DETECTION_VERSION and fingerprint(checkout, sources) == sources
     if saved is not None and not force and current:
+        ui.skip("detect", f"saved in {config_file.name}")
         return Detection(checks=saved, sources=list(sources), tests_in_ci=data.get("tests_in_ci") is True)
 
-    step("detect checks")
+    ui.start("detect", "detect checks")
+    ui.status("claude looks for the repo's checks")
     detection = agent.detect_checks()
     for command in detection.checks:
-        print(f"  {command}")
+        ui.log(f"  {command}")
     if not detection.checks:
-        print("  (none found)")
+        ui.log("  (none found)")
 
     if detection.checks != saved and not approve(f"save these checks to {config_file}?"):
         raise ShipError(f"aborted - you can write the checks into {config_file} yourself")
@@ -47,7 +51,8 @@ def resolve_checks(config_file: Path, checkout: Path, agent: Agent, approve: App
         },
     )
     if detection.tests_in_ci:
-        print("  tests are left to the PR's CI")
+        ui.log("  tests are left to the PR's CI")
+    ui.done("detect", f"{len(detection.checks)} check(s) saved")
     return detection
 
 

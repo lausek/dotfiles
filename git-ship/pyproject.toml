@@ -3,7 +3,7 @@ name = "git-ship"
 version = "0.1.0"
 description = "Validate a branch with an AI review and your checks in a disposable worktree, then push and open a PR"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["rich>=13"]
 
 [project.scripts]
 git-ship = "git_ship.cli:main"

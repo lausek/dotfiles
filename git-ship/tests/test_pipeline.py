@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision, untested_warning
+from git_ship.cli import needs_decision, plan, untested_warning
 from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
@@ -30,6 +30,7 @@ from git_ship.pipeline import (
 )
 from git_ship.report import fit, with_assessment
 from git_ship.shell import NeedsDecision, ShipError
+from git_ship.ui import PlainUi, PlannedStep, Progress
 
 BUG = Finding(file="m.py", line=2, summary="off by one", needs_user=False)
 DECISION = Finding(file="m.py", line=5, summary="should this raise?", needs_user=True)
@@ -139,7 +140,7 @@ class PipelineTest(unittest.TestCase):
 
     def make_run(self, wt: Git, agent: FakeAgent, decide=None) -> Run:
         change = Change("HEAD~1..HEAD", None)
-        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main")
+        return Run(worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main", ui=PlainUi())
 
     def diverge(self, ours: str = "ours", theirs: str = "theirs"):
         """Puts the repo on a branch whose change to `a` conflicts with main's."""
@@ -295,7 +296,7 @@ class ResolveChecksTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def resolve(self, approve=lambda q: True, force=False):
-        return resolve_checks(self.config_file, self.checkout, self.agent, approve, force)
+        return resolve_checks(self.config_file, self.checkout, self.agent, approve, force, PlainUi())
 
     def test_detects_and_saves_on_first_run(self):
         self.assertEqual(self.resolve().checks, ["make test"])
@@ -395,6 +396,53 @@ class HelpersTest(unittest.TestCase):
         self.assertIsInstance(detect_host("https://org@dev.azure.com/org/p/_git/r", cwd), AzureDevOps)
         self.assertIsInstance(detect_host("git@ssh.dev.azure.com:v3/org/p/r", cwd), AzureDevOps)
         self.assertIsNone(detect_host("git@gitlab.com:a/b.git", cwd))
+
+
+
+class ProgressTest(unittest.TestCase):
+    def setUp(self):
+        self.time = 0.0
+        self.progress = Progress(now=lambda: self.time)
+        self.progress.plan([PlannedStep("review", "review"), PlannedStep("checks", "checks"), PlannedStep("ci", "CI")])
+
+    def states(self) -> list[tuple[str, str]]:
+        return [(step.key, step.state) for step in self.progress.steps]
+
+    def test_replanning_keeps_what_ran_and_replaces_what_is_ahead(self):
+        self.progress.start("review", "review (round 1)")
+        self.progress.plan([PlannedStep("review", "review"), PlannedStep("check:0", "check: make"), PlannedStep("ci", "CI")])
+        self.assertEqual(self.states(), [("review", "running"), ("check:0", "pending"), ("ci", "pending")])
+        self.assertEqual(self.progress.steps[0].title, "review (round 1)")
+
+    def test_rounds_keep_the_start_time(self):
+        self.progress.start("review", "review (round 1)")
+        self.time = 30
+        self.progress.start("review", "review (round 2)")
+        self.time = 50
+        self.progress.done("review", "risk: low")
+        step = self.progress.steps[0]
+        self.assertEqual((step.title, step.state, step.note, step.elapsed(99)), ("review (round 2)", "done", "risk: low", 50))
+
+    def test_status_goes_to_the_step_started_last(self):
+        self.progress.start("ci", "CI (round 1)")
+        self.time = 1
+        self.progress.start("merge", "resolve merge conflicts")
+        self.progress.status("claude resolves 1 conflicted file(s)")
+        self.progress.done("merge")
+        self.progress.status("waiting for CI")
+        self.assertEqual(self.progress.steps[2].note, "waiting for CI")
+        self.assertEqual(self.progress.steps[3].note, "")
+
+    def test_failure_marks_running_steps(self):
+        self.progress.start("review", "review (round 1)")
+        self.progress.fail_running()
+        self.assertEqual(self.states(), [("review", "failed"), ("checks", "pending"), ("ci", "pending")])
+
+    def test_plan_lists_each_check_once_known(self):
+        keys = [step.key for step in plan("main", "b", None)]
+        self.assertEqual(keys, ["merge", "detect", "review", "checks", "push", "pr", "ci"])
+        keys = [step.key for step in plan("main", "b", ["make lint", "make test"])]
+        self.assertEqual(keys, ["merge", "detect", "review", "check:0", "check:1", "push", "pr", "ci"])
 
 
 if __name__ == "__main__":

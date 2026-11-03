@@ -27,7 +27,13 @@ git ship -y             # never asks, exits with 2 on those instead
 git ship -y --fix-asks  # fix them too
 git ship -y --keep-asks # keep them as they are, they are listed in the PR
 git ship --ticket 1234  # the change implements this issue / work item
+git ship --plain        # log the steps instead of the live step list
 ```
+
+On a terminal, git-ship shows every step ahead as a list pinned to the bottom and updates it in place:
+which step runs, what it does right now and how long each took. Findings and other output scroll above it.
+Without a terminal, e.g. when an agent like the `/ship` skill runs it or the output is piped, it logs
+the steps as they happen instead. No setting needed, the same check git uses for its pager.
 
 `--ticket` hands the GitHub issue or Azure DevOps work item to the reviewer, which then also checks the
 change against it, and links it to the PR so merging closes it.
