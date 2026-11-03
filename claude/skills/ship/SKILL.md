@@ -31,7 +31,7 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 ## 3. Act on the exit code
 
 **0 - shipped.** Report:
-- the PR link and the risk line (`risk: low|medium|high - ...` from the last review round)
+- the PR link and the risk line (`risk: low|medium|high - ...` from the last review)
 - the checks it detected, if a `detect checks` section shows up in the output (they were saved to `.git/ship.json`)
 - any `warning:` line, verbatim. "the tests did not run" means nothing tested the change.
 - the commits git-ship added, including a `chore: merge origin/<base> and resolve conflicts` if it resolved conflicts. Ask the user to look at that resolution in the PR. If it added any, run `git pull --ff-only` on the branch so the local branch has them.

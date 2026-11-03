@@ -1,12 +1,13 @@
 """The live step list, used on an interactive terminal unless `--plain` is given. Every step ahead stays
 pinned at the bottom of the terminal and shows which one runs, what it does right now and how long it took.
-Logs scroll above it."""
+What a step found, e.g. the review's findings, shows under it. When the pipeline starts over after a fix,
+the finished attempt is kept in the scrollback and the same steps run again from the top."""
 
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.spinner import Spinner
 from rich.table import Table
@@ -14,9 +15,13 @@ from rich.text import Text
 
 from .ui import PlannedStep, Progress, Step
 
+LIVE_DETAIL_LINES = 6
+"""Per step. The live list can't be taller than the terminal, the copy in the scrollback has them all."""
+
 ICONS = {
     "pending": Text("·", style="dim"),
     "done": Text("✓", style="green"),
+    "fixed": Text("↻", style="yellow"),
     "skipped": Text("-", style="dim"),
     "failed": Text("✗", style="bold red"),
 }
@@ -41,11 +46,11 @@ class TerminalUi:
             yield
         except BaseException:
             with self._lock:
-                self.progress.fail_running()
+                self.progress.end_running("failed")
             raise
         finally:
             self._live.stop()
-            self.console.print(self._render())
+            self.console.print(self._render(all_details=True))
 
     def plan(self, steps: Sequence[PlannedStep]) -> None:
         with self._lock:
@@ -68,6 +73,18 @@ class TerminalUi:
         with self._lock:
             self.progress.status(text)
 
+    def details(self, key: str, lines: Sequence[str]) -> None:
+        with self._lock:
+            self.progress.details(key, lines)
+
+    def restart(self, attempt: int, attempts: int, reason: str) -> None:
+        with self._lock:
+            self.progress.end_running("fixed", f"{reason}, starting over")
+        self.console.print(self._render(all_details=True))
+        self.console.print()
+        with self._lock:
+            self.progress.restart(attempt, attempts, reason)
+
     def log(self, text: str) -> None:
         # Not markup: findings like "[auto-fix] ..." would be read as style tags.
         self.console.print(Text(text))
@@ -79,14 +96,16 @@ class TerminalUi:
         finally:
             self._live.start()
 
-    def _render(self) -> RenderableType:
+    def _render(self, all_details: bool = False) -> RenderableType:
+        """One row per step. A step's details go under it on their own lines, between table segments
+        of the same column widths, so a long finding doesn't widen the columns."""
         with self._lock:
             now = self.progress.now()
-            table = Table.grid(padding=(0, 1))
-            table.add_column(width=1)
-            table.add_column(no_wrap=True)
-            table.add_column(justify="right", style="dim", no_wrap=True)
-            table.add_column(overflow="ellipsis", no_wrap=True)
+            title_width = max((len(step.title) for step in self.progress.steps), default=0)
+            parts: list[RenderableType] = []
+            if self.progress.attempt:
+                parts.append(Text(self.progress.attempt, style="bold yellow"))
+            table = _table(title_width)
             for step in self.progress.steps:
                 table.add_row(
                     self._icon(step),
@@ -94,12 +113,43 @@ class TerminalUi:
                     _duration(step.elapsed(now)),
                     Text(step.note, style="red" if step.state == "failed" else "dim"),
                 )
-            return table
+                if step.details:
+                    parts += [table, _details(step.details, all_details)]
+                    table = _table(title_width)
+            if table.row_count:
+                parts.append(table)
+            return Group(*parts)
 
     def _icon(self, step: Step) -> RenderableType:
         if step.state == "running":
             return self._spinners.setdefault(step.key, Spinner("dots", style="cyan"))
         return ICONS[step.state]
+
+
+def _table(title_width: int) -> Table:
+    """The fixed columns keep their width, the note gets what is left and is cut to fit."""
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(width=1, min_width=1)
+    table.add_column(width=title_width, min_width=min(title_width, 40), no_wrap=True, overflow="ellipsis")
+    table.add_column(width=5, min_width=5, justify="right", style="dim", no_wrap=True)
+    table.add_column(ratio=1, overflow="ellipsis", no_wrap=True)
+    return table
+
+
+def _details(lines: list[str], all_details: bool) -> Table:
+    """Indented under the step. Live they are cut to one line each, in the scrollback they wrap."""
+    table = Table.grid(expand=True)
+    table.add_column(width=4, min_width=4)
+    table.add_column(ratio=1, overflow="fold" if all_details else "ellipsis", no_wrap=not all_details)
+    for line in _shown(lines, all_details):
+        table.add_row("", Text(line))
+    return table
+
+
+def _shown(details: list[str], all_details: bool) -> list[str]:
+    if all_details or len(details) <= LIVE_DETAIL_LINES:
+        return details
+    return [*details[: LIVE_DETAIL_LINES - 1], f"... {len(details) - LIVE_DETAIL_LINES + 1} more"]
 
 
 def _title_style(step: Step) -> str:

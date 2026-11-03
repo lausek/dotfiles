@@ -1,17 +1,17 @@
 import subprocess
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
 from .agent import Agent
 from .git import Git
 from .hosts import Host
-from .models import Assessment, Change, Check, Finding
+from .models import Assessment, Change, Check, Detection, Finding
 from .shell import ShipError
-from .ui import Ui
+from .ui import PlannedStep, Ui
 
 Decision = Literal["fix", "keep"]
 Decide = Callable[[Sequence[Finding]], Decision]
@@ -29,16 +29,125 @@ class MergeConflict(ShipError):
     """The PR has merge conflicts with its base, so its CI doesn't run."""
 
 
+class Restart(Exception):
+    """A step committed a fix. The pipeline starts over, so every fix is reviewed and checked like the rest."""
+
+    def __init__(self, reason: str, conflicts: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.conflicts = conflicts
+        """The PR reported merge conflicts, so the next merge step has to find them."""
+
+
 @dataclass(frozen=True)
 class Run:
     worktree: Git
     agent: Agent
     change: Change
     rounds: int
+    """How often the pipeline may fix something and start over."""
     decide: Decide
     base: str
     """Branch the PR merges into, e.g. 'main'."""
     ui: Ui
+    attempt: int = 1
+
+    @property
+    def attempts(self) -> int:
+        return self.rounds + 1
+
+
+@dataclass(frozen=True)
+class Clock:
+    now: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+
+
+SYSTEM_CLOCK = Clock()
+
+
+@dataclass(frozen=True)
+class Target:
+    """Where the validated branch goes."""
+
+    branch: str
+    host: Host | None
+    ci_timeout: float
+    """Seconds to wait for CI per attempt, 0 doesn't watch it."""
+    resolve_checks: Callable[[], Detection]
+    """The saved checks, detected again when the files they came from changed, e.g. by a fix."""
+    open_pr: Callable[[Assessment], str]
+    """Opens the PR, or finds the open one. Returns its link."""
+
+
+@dataclass(frozen=True)
+class Shipped:
+    detection: Detection
+    ci_checks: list[Check]
+    """The CI checks that passed, empty if none showed up or CI wasn't watched."""
+
+
+def ship_pipeline(run: Run, target: Target, clock: Clock = SYSTEM_CLOCK) -> Shipped:
+    """merge -> detect checks -> review -> checks -> push -> PR -> CI. A step that fixes something commits
+    the fix and starts the pipeline over from the top."""
+    kept: list[Finding] = []
+    restart: Restart | None = None
+    run.ui.plan(plan(run.base, target.branch, checks=None))
+    for attempt in count(1):
+        if restart:
+            run.ui.restart(attempt, run.attempts, restart.reason)
+        try:
+            return _attempt(replace(run, attempt=attempt), target, kept, restart is not None and restart.conflicts, clock)
+        except Restart as error:
+            restart = error
+    raise AssertionError("unreachable")
+
+
+def _attempt(run: Run, target: Target, kept: list[Finding], conflicts_expected: bool, clock: Clock) -> Shipped:
+    if not merge_step(run):
+        if conflicts_expected:
+            raise ShipError(f"the PR reports merge conflicts, but origin/{run.base} merges cleanly here - check the PR yourself")
+        run.ui.skip("merge", "no conflicts")
+
+    detection = target.resolve_checks()
+    run.ui.plan(plan(run.base, target.branch, detection.checks))
+    if not detection.checks:
+        run.ui.skip("checks", "none detected")
+    assessment = review_step(run, kept)
+    checks_step(run, detection.checks)
+
+    run.ui.start("push", f"push {target.branch}")
+    push(run.worktree, target.branch)
+    run.ui.done("push")
+
+    if target.host is None:
+        run.ui.skip("pr", "unknown host, open it yourself")
+        run.ui.skip("ci", "unknown host")
+        return Shipped(detection, [])
+
+    run.ui.start("pr", "pull request")
+    run.ui.done("pr", target.open_pr(assessment))
+    if target.ci_timeout <= 0:
+        run.ui.skip("ci", "disabled (ci_timeout_minutes: 0)")
+        return Shipped(detection, [])
+    return Shipped(detection, ci_step(run, target.host, target.branch, target.ci_timeout, clock))
+
+
+def plan(base: str, branch: str, checks: Sequence[str] | None) -> list[PlannedStep]:
+    """The steps ahead. The checks are one step until they are known."""
+    if checks:
+        check_steps = [PlannedStep(check_key(index), f"check: {command}") for index, command in enumerate(checks)]
+    else:
+        check_steps = [PlannedStep("checks", "checks")]
+    return [
+        PlannedStep("merge", f"merge origin/{base}"),
+        PlannedStep("detect", "detect checks"),
+        PlannedStep("review", "review"),
+        *check_steps,
+        PlannedStep("push", f"push {branch}"),
+        PlannedStep("pr", "pull request"),
+        PlannedStep("ci", "CI"),
+    ]
 
 
 def check_key(index: int) -> str:
@@ -56,8 +165,7 @@ def merge_step(run: Run) -> bool:
         return False
 
     run.ui.start("merge", f"resolve merge conflicts with {base}")
-    for path in conflicted:
-        run.ui.log(f"[conflict] {path}")
+    run.ui.details("merge", [f"[conflict] {path}" for path in conflicted])
     untracked_before = run.worktree.untracked()
     for round in count(1):
         run.ui.status(f"claude resolves {len(conflicted)} conflicted file(s)")
@@ -77,6 +185,7 @@ def merge_step(run: Run) -> bool:
             raise ShipError(f"merge conflicts with {base} still unresolved after {run.rounds} rounds: {', '.join(remaining)}")
         conflicted = remaining
     # Committed even without content changes: the merge commit makes the base a parent, which resolves the PR.
+    # The pipeline goes on with the review, which sees the merge as part of the change.
     _stage(run.worktree, untracked_before)
     run.worktree("commit", "-q", "-m", f"chore: merge {base} and resolve conflicts")
     run.ui.done("merge", "conflicts resolved")
@@ -90,33 +199,33 @@ def _has_conflict_markers(path: Path) -> bool:
     return any(line.startswith(CONFLICT_MARKERS) for line in lines)
 
 
-def review_step(run: Run) -> Assessment:
-    """Reviews the full change until it is clean. Each round of fixes is reviewed again."""
-    kept: list[Finding] = []
-    for round in count(1):
-        run.ui.start("review", f"review (round {round})")
-        run.ui.status("claude reviews the change")
-        review = run.agent.review(run.change, kept)
-        run.ui.log(f"risk: {review.risk} - {review.risk_rationale}")
-        assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
-        if not review.findings:
-            run.ui.log("no findings")
-            run.ui.done("review", f"risk: {review.risk}")
-            return assessment
+def review_step(run: Run, kept: list[Finding]) -> Assessment:
+    """Reviews the full change. Findings to fix are fixed, then the pipeline starts over.
+    Findings the author keeps are added to `kept`, so later reviews don't report them again."""
+    run.ui.start("review", "review")
+    run.ui.status("claude reviews the change")
+    review = run.agent.review(run.change, kept)
+    findings = [f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}" for finding in review.findings]
+    run.ui.details("review", [f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])])
+    assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
+    if not review.findings:
+        run.ui.done("review", f"risk: {review.risk}")
+        return assessment
 
-        for finding in review.findings:
-            run.ui.log(f"[{'ask-user' if finding.needs_user else 'auto-fix'}] {finding}")
-        if round > run.rounds:
-            raise ShipError(f"still findings after {run.rounds} fix rounds")
+    to_fix = select_fixes(review.findings, run.decide)
+    kept += [finding for finding in review.findings if finding not in to_fix]
+    if not to_fix:
+        run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
+        return assessment
 
-        to_fix = select_fixes(review.findings, run.decide)
-        kept += [finding for finding in review.findings if finding not in to_fix]
-        if not to_fix:
-            run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
-            return assessment
-
-        run.ui.status(f"claude fixes {len(to_fix)} finding(s)")
-        fix(run, "fix: address review findings", "\n".join(f"- {finding}" for finding in to_fix))
+    fix(
+        run,
+        problem="still findings",
+        status=f"claude fixes {len(to_fix)} finding(s)",
+        message="fix: address review findings",
+        instructions="\n".join(f"- {finding}" for finding in to_fix),
+        reason=f"fixed {len(to_fix)} review finding(s)",
+    )
     raise AssertionError("unreachable")
 
 
@@ -128,83 +237,66 @@ def select_fixes(findings: Sequence[Finding], decide: Decide) -> list[Finding]:
 
 
 def checks_step(run: Run, commands: Sequence[str]) -> None:
-    """Runs each check in order. A failing check is handed to the agent to fix, then rerun."""
+    """Runs each check in order. A failing check is fixed, then the pipeline starts over."""
     for index, command in enumerate(commands):
         key = check_key(index)
-        for round in count(1):
-            run.ui.start(key, f"check: {command}" if round == 1 else f"check: {command} (round {round})")
-            result = subprocess.run(
-                command, shell=True, cwd=run.worktree.cwd, check=False,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            if result.returncode == 0:
-                run.ui.done(key)
-                break
-
-            run.ui.log(_tail(result.stdout, 40))
-            if round > run.rounds:
-                raise ShipError(f"'{command}' still failing after {run.rounds} fix rounds")
-
-            run.ui.status("claude fixes the failure")
-            fix(
-                run,
-                f"fix: make '{command}' pass",
-                f"The command `{command}` fails. Make it pass by fixing the code, "
-                f"not by weakening or skipping tests. Output (tail):\n\n{_tail(result.stdout, 200)}",
-            )
-
-
-@dataclass(frozen=True)
-class Clock:
-    now: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], None] = time.sleep
-
-
-SYSTEM_CLOCK = Clock()
-
-
-def ci_step(
-    run: Run, host: Host, branch: str, publish: Callable[[], None], timeout: float, clock: Clock = SYSTEM_CLOCK
-) -> list[Check]:
-    """Waits for the PR's CI. Failures are handed to the agent with their logs, fixed and published.
-    Returns the passed checks, empty if none showed up."""
-    for round in count(1):
-        run.ui.start("ci", f"CI (round {round})")
-        try:
-            checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, run.ui, clock)
-        except MergeConflict:
-            if round > run.rounds:
-                raise
-            run.ui.log("the base moved and the PR has merge conflicts now")
-            if not merge_step(run):
-                raise ShipError(f"the PR reports merge conflicts, but origin/{run.base} merges cleanly here - check the PR yourself")
-            publish()
+        run.ui.start(key, f"check: {command}")
+        result = subprocess.run(
+            command, shell=True, cwd=run.worktree.cwd, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if result.returncode == 0:
+            run.ui.done(key)
             continue
 
-        failed = [check for check in checks if check.state == "failed"]
-        if not failed:
-            run.ui.log("CI passed" if checks else "no CI checks showed up, skipping")
-            if checks:
-                run.ui.done("ci", f"{len(checks)} check(s) passed")
-            else:
-                run.ui.skip("ci", "no CI checks showed up")
-            return checks
-
-        for check in failed:
-            run.ui.log(f"[failed] {check.name}")
-        if round > run.rounds:
-            raise ShipError(f"CI still failing after {run.rounds} fix rounds")
-
-        run.ui.status(f"claude fixes {len(failed)} failed check(s)")
-        logs = "\n\n".join(f"# {check.name}\n{_tail(host.failure_log(check), CI_LOG_LINES)}" for check in failed)
+        run.ui.log(_tail(result.stdout, 40))
         fix(
             run,
-            f"fix: make CI pass ({', '.join(check.name for check in failed)})",
-            "These CI checks fail. Make them pass by fixing the code, not by weakening or skipping tests. "
-            "Only change CI configuration if it is clearly the cause. Logs (tail):\n\n" + logs,
+            problem=f"'{command}' still failing",
+            status="claude fixes the failure",
+            message=f"fix: make '{command}' pass",
+            instructions=f"The command `{command}` fails. Make it pass by fixing the code, "
+            f"not by weakening or skipping tests. Output (tail):\n\n{_tail(result.stdout, 200)}",
+            reason=f"fixed '{command}'",
         )
-        run.ui.status("pushing the fix")
-        publish()
+
+
+def ci_step(run: Run, host: Host, branch: str, timeout: float, clock: Clock = SYSTEM_CLOCK) -> list[Check]:
+    """Waits for the PR's CI. Failures are fixed with their logs, then the pipeline starts over.
+    Returns the passed checks, empty if none showed up."""
+    run.ui.start("ci", "CI")
+    try:
+        checks = wait_for_checks(host, branch, run.worktree("rev-parse", "HEAD"), timeout, run.ui, clock)
+    except MergeConflict:
+        if run.attempt >= run.attempts:
+            raise
+        run.ui.log("the base moved and the PR has merge conflicts now")
+        raise Restart("the base moved, the PR has merge conflicts", conflicts=True)
+
+    failed = [check for check in checks if check.state == "failed"]
+    if not failed:
+        run.ui.log("CI passed" if checks else "no CI checks showed up, skipping")
+        if checks:
+            run.ui.done("ci", f"{len(checks)} check(s) passed")
+        else:
+            run.ui.skip("ci", "no CI checks showed up")
+        return checks
+
+    names = ", ".join(check.name for check in failed)
+    run.ui.details("ci", [f"[failed] {check.name}" for check in failed])
+    if run.attempt >= run.attempts:
+        raise ShipError(f"CI still failing after {run.rounds} fix rounds")
+    run.ui.status("fetching the logs")
+    logs = "\n\n".join(f"# {check.name}\n{_tail(host.failure_log(check), CI_LOG_LINES)}" for check in failed)
+    fix(
+        run,
+        problem="CI still failing",
+        status=f"claude fixes {len(failed)} failed check(s)",
+        message=f"fix: make CI pass ({names})",
+        instructions="These CI checks fail. Make them pass by fixing the code, not by weakening or skipping tests. "
+        "Only change CI configuration if it is clearly the cause. Logs (tail):\n\n" + logs,
+        reason=f"fixed CI ({names})",
+    )
     raise AssertionError("unreachable")
 
 
@@ -231,11 +323,16 @@ def wait_for_checks(host: Host, branch: str, head: str, timeout: float, ui: Ui, 
         clock.sleep(CI_POLL_SECONDS)
 
 
-def fix(run: Run, message: str, instructions: str) -> None:
-    """Lets the agent fix and commits the result."""
+def fix(run: Run, problem: str, status: str, message: str, instructions: str, reason: str) -> NoReturn:
+    """Lets the agent fix, commits the result and starts the pipeline over. Gives up with `problem` when
+    the pipeline already started over as often as it may."""
+    if run.attempt >= run.attempts:
+        raise ShipError(f"{problem} after {run.rounds} fix rounds")
+    run.ui.status(status)
     untracked_before = run.worktree.untracked()
     run.agent.fix(instructions)
     _commit(run.worktree, untracked_before, message)
+    raise Restart(reason)
 
 
 def _commit(wt: Git, untracked_before: set[str], message: str) -> None:

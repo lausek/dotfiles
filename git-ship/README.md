@@ -3,17 +3,20 @@
 Validates the current branch in a disposable worktree, then pushes it, opens a PR on GitHub or Azure DevOps and watches CI.
 
 ```
-resolve conflicts -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix
+resolve conflicts -> review -> checks -> push -> PR -> CI
 ```
 
+Whenever a step fixes something, the fix is committed and the pipeline starts over from the top. So every
+commit git-ship pushes was reviewed and checked, including fixes for failing checks and CI.
+
 - The review runs in a fresh `claude -p` session that can only read. Findings are `auto-fix` (fixed and committed) or `ask-user` (you decide).
-- Findings you choose to keep are passed to the next review round, so they aren't reported again.
+- Findings you choose to keep are passed to the next reviews, so they aren't reported again.
 - The review also rates how carefully a human has to look at the PR (low / medium / high risk). That rating heads the PR description.
-- A failing check is handed to Claude to fix, then rerun.
-- CI of the PR is watched. Failing checks are handed to Claude with their logs, fixed, pushed and watched again.
+- A failing check is handed to Claude to fix.
+- CI of the PR is watched. Failing checks are handed to Claude with their logs.
 - The machine doesn't go to sleep while shipping, the same way `claude-awake` does it (`systemd-inhibit`).
 - Pushes never force. If you committed in the meantime, the push fails and nothing is lost.
-- PRs with merge conflicts get no CI. If the branch conflicts with the base, git-ship merges the base in and Claude resolves the conflicts (markers in diff3 style, so it sees the common ancestor). The merge commit then goes through the review and the checks like any other change. If the base moves into a conflict while CI is watched, the same happens and the merge is pushed. A branch that merges cleanly is left as it is.
+- PRs with merge conflicts get no CI. If the branch conflicts with the base, git-ship merges the base in and Claude resolves the conflicts (markers in diff3 style, so it sees the common ancestor). The merge commit then goes through the review and the checks like any other change. If the base moves into a conflict while CI is watched, the pipeline starts over and resolves it the same way. A branch that merges cleanly is left as it is.
 
 ## Install
 
@@ -31,7 +34,8 @@ git ship --plain        # log the steps instead of the live step list
 ```
 
 On a terminal, git-ship shows every step ahead as a list pinned to the bottom and updates it in place:
-which step runs, what it does right now and how long each took. Findings and other output scroll above it.
+which step runs, what it does right now and how long each took. The review's findings show under the review.
+When the pipeline starts over, the finished attempt stays in the scrollback and the list runs from the top again.
 Without a terminal, e.g. when an agent like the `/ship` skill runs it or the output is piped, it logs
 the steps as they happen instead. No setting needed, the same check git uses for its pager.
 
@@ -67,11 +71,11 @@ git ship --setup    # detect the checks again
 ```
 
 - `base`: default `origin/HEAD`
-- `rounds`: fix attempts per step, default 3
+- `rounds`: how often the pipeline may fix something and start over, default 3
 - `ci_timeout_minutes`: how long to wait for CI per round, `0` disables watching CI, default 60
 
 ## Develop
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```

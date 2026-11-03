@@ -1,3 +1,5 @@
+import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -5,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from git_ship.checks import fingerprint, resolve_checks
-from git_ship.cli import needs_decision, plan, untested_warning
+from git_ship.cli import needs_decision, untested_warning
 from git_ship.config import Config
 from git_ship.git import Git, worktree
 from git_ship.hosts import AzureDevOps, GitHub, detect_host
@@ -22,11 +24,14 @@ from git_ship.models import (
 from git_ship.pipeline import (
     Clock,
     Run,
-    checks_step,
+    Shipped,
+    Target,
     ci_step,
     merge_step,
+    plan,
     review_step,
     select_fixes,
+    ship_pipeline,
 )
 from git_ship.report import fit, with_assessment
 from git_ship.shell import NeedsDecision, ShipError
@@ -154,67 +159,81 @@ class PipelineTest(unittest.TestCase):
         self.repo("commit", "-qm", "theirs")
         self.repo("checkout", "-q", "feature")
 
-    def test_auto_fixes_are_committed_and_rereviewed(self):
+    def ship(self, wt: Git, agent: FakeAgent, checks=(), host=None, decide=None, open_pr=None) -> Shipped:
+        target = Target(
+            branch="b",
+            host=host,
+            ci_timeout=600,
+            resolve_checks=lambda: Detection(checks=list(checks), sources=[]),
+            open_pr=open_pr or (lambda assessment: "url"),
+        )
+        return ship_pipeline(self.make_run(wt, agent, decide), target, FakeClock())
+
+    def test_auto_fixes_are_committed_and_reviewed_again(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[BUG]])
-            review_step(self.make_run(wt, agent))
+            self.ship(wt, agent)
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: address review findings"])
             self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
 
     def test_kept_findings_are_passed_to_next_review(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[BUG, DECISION]])
-            review_step(self.make_run(wt, agent, decide=answer("keep")))
+            self.ship(wt, agent, decide=answer("keep"))
             self.assertEqual(agent.kept_per_round[1], [DECISION])
             self.assertNotIn("should this raise", agent.fixes[0])
 
     def test_gives_up_after_rounds(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[BUG], [BUG], [BUG]])
-            with self.assertRaisesRegex(ShipError, "after 2 fix rounds"):
-                review_step(self.make_run(wt, agent))
+            with self.assertRaisesRegex(ShipError, "still findings after 2 fix rounds"):
+                self.ship(wt, agent)
+            self.assertEqual(len(agent.fixes), 2)
 
-    def test_failing_check_is_fixed_and_rerun(self):
+    def test_check_fix_is_reviewed_and_checked_again(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [])
-            checks_step(self.make_run(wt, agent), ["test -f fixed"])
+            self.ship(wt, agent, checks=["true", "test -f fixed"])
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: make 'test -f fixed' pass"])
+            self.assertEqual(len(agent.kept_per_round), 2)
 
     def test_check_artifacts_are_not_committed(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [])
-            checks_step(self.make_run(wt, agent), ["touch artifact; test -f fixed"])
+            self.ship(wt, agent, checks=["touch artifact; test -f fixed"])
             self.assertEqual(wt("show", "--name-only", "--format=", "HEAD"), "fixed")
 
     def test_review_returns_risk_and_kept_findings(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[DECISION]])
-            assessment = review_step(self.make_run(wt, agent, decide=answer("keep")))
+            assessment = review_step(self.make_run(wt, agent, decide=answer("keep")), [])
             self.assertEqual(assessment, Assessment(risk="medium", risk_rationale="touches m.py", kept=[DECISION]))
 
-    def test_ci_failure_is_fixed_and_published(self):
+    def test_ci_fix_is_reviewed_and_pushed(self):
         pending = Check(name="build", state="pending", ref="")
         failed = Check(name="build", state="failed", ref="")
         passed = Check(name="build", state="passed", ref="")
-        published = []
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [])
             host = FakeHost([[pending], [failed], [], [passed]])
-            ci_step(self.make_run(wt, agent), host, "b", lambda: published.append(True), 600, FakeClock())
+            shipped = self.ship(wt, agent, host=host)
+            self.assertEqual(shipped.ci_checks, [passed])
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: make CI pass (build)"])
             self.assertIn("log of build", agent.fixes[0])
-            self.assertEqual(published, [True])
+            self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
 
     def test_ci_without_checks_is_skipped_after_grace(self):
         with worktree(self.repo) as wt:
-            ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), FakeHost([]), "b", lambda: None, 600, FakeClock())
+            self.assertEqual(ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), FakeHost([]), "b", 600, FakeClock()), [])
 
     def test_ci_times_out(self):
         pending = Check(name="build", state="pending", ref="")
         with worktree(self.repo) as wt:
             host = FakeHost([[pending]] * 100)
             with self.assertRaisesRegex(ShipError, "still running"):
-                ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", lambda: None, 600, FakeClock())
+                ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", 600, FakeClock())
 
     def test_merge_step_leaves_a_branch_without_conflicts_alone(self):
         with worktree(self.repo) as wt:
@@ -258,24 +277,38 @@ class PipelineTest(unittest.TestCase):
                 wt.merge_conflicts("nope")
             self.assertTrue(wt.is_clean())
 
-    def test_ci_resolves_conflicts_and_publishes(self):
-        self.diverge()
+    def test_conflicts_from_a_moved_base_are_resolved_from_the_top(self):
         pending = Check(name="build", state="pending", ref="")
         passed = Check(name="build", state="passed", ref="")
-        published = []
         with worktree(self.repo) as wt:
             host = FakeHost([[pending], [pending], [passed]], conflicts=True)
-            publish = lambda: (published.append(True), setattr(host, "conflicts", False))
-            ci_step(self.make_run(wt, ResolvingAgent(wt.cwd, "both")), host, "b", publish, 600, FakeClock())
-            self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["chore: merge origin/main and resolve conflicts"])
-            self.assertEqual(published, [True])
+            opened = []
 
-    def test_ci_stops_when_host_conflicts_do_not_reproduce(self):
+            def open_pr(assessment):
+                if not opened:  # the base moves into a conflict while CI runs
+                    self.repo("checkout", "-q", "main")
+                    (self.repo.cwd / "a").write_text("theirs")
+                    self.repo("commit", "-qam", "theirs")
+                    self.repo("checkout", "-q", "-")
+                else:
+                    host.conflicts = False
+                opened.append(True)
+                return "url"
+
+            agent = ResolvingAgent(wt.cwd, "both")
+            (wt.cwd / "a").write_text("ours")
+            wt("commit", "-qam", "ours")
+            self.ship(wt, agent, host=host, open_pr=open_pr)
+            self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["chore: merge origin/main and resolve conflicts"])
+            self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
+
+    def test_stops_when_host_conflicts_do_not_reproduce(self):
         pending = Check(name="build", state="pending", ref="")
         with worktree(self.repo) as wt:
             host = FakeHost([[pending]] * 100, conflicts=True)
             with self.assertRaisesRegex(ShipError, "merges cleanly here"):
-                ci_step(self.make_run(wt, FakeAgent(wt.cwd, [])), host, "b", lambda: None, 600, FakeClock())
+                self.ship(wt, FakeAgent(wt.cwd, []), host=host)
 
     def test_worktree_is_removed(self):
         with worktree(self.repo) as wt:
@@ -414,14 +447,23 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(self.states(), [("review", "running"), ("check:0", "pending"), ("ci", "pending")])
         self.assertEqual(self.progress.steps[0].title, "review (round 1)")
 
-    def test_rounds_keep_the_start_time(self):
-        self.progress.start("review", "review (round 1)")
-        self.time = 30
-        self.progress.start("review", "review (round 2)")
-        self.time = 50
+    def test_restart_runs_the_same_steps_from_the_top(self):
+        self.progress.start("review", "review")
+        self.progress.details("review", ["[auto-fix] m.py:2 - off by one"])
         self.progress.done("review", "risk: low")
-        step = self.progress.steps[0]
-        self.assertEqual((step.title, step.state, step.note, step.elapsed(99)), ("review (round 2)", "done", "risk: low", 50))
+        self.progress.start("checks", "checks")
+        self.progress.restart(2, 3, "fixed 1 review finding(s)")
+        self.assertEqual(self.states(), [("review", "pending"), ("checks", "pending"), ("ci", "pending")])
+        self.assertEqual(self.progress.attempt, "attempt 2/3 - fixed 1 review finding(s)")
+        self.assertEqual([(step.note, step.details, step.started) for step in self.progress.steps], [("", [], None)] * 3)
+
+    def test_details_belong_to_a_step_until_it_starts_again(self):
+        self.progress.start("review", "review")
+        self.progress.details("review", ["no findings"])
+        self.progress.done("review")
+        self.assertEqual(self.progress.steps[0].details, ["no findings"])
+        self.progress.start("review", "review")
+        self.assertEqual(self.progress.steps[0].details, [])
 
     def test_status_goes_to_the_step_started_last(self):
         self.progress.start("ci", "CI (round 1)")
@@ -435,7 +477,7 @@ class ProgressTest(unittest.TestCase):
 
     def test_failure_marks_running_steps(self):
         self.progress.start("review", "review (round 1)")
-        self.progress.fail_running()
+        self.progress.end_running("failed")
         self.assertEqual(self.states(), [("review", "failed"), ("checks", "pending"), ("ci", "pending")])
 
     def test_plan_lists_each_check_once_known(self):
@@ -443,6 +485,45 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(keys, ["merge", "detect", "review", "checks", "push", "pr", "ci"])
         keys = [step.key for step in plan("main", "b", ["make lint", "make test"])]
         self.assertEqual(keys, ["merge", "detect", "review", "check:0", "check:1", "push", "pr", "ci"])
+
+
+
+@unittest.skipUnless(importlib.util.find_spec("rich"), "rich is not installed")
+class TerminalUiTest(unittest.TestCase):
+    def render(self, ui) -> str:
+        ui.console.print(ui._render())
+        return ui.console.export_text()
+
+    def make_ui(self):
+        from rich.console import Console
+
+        from git_ship.tui import TerminalUi
+
+        ui = TerminalUi(Console(width=60, record=True, file=io.StringIO()))
+        ui.plan(plan("main", "b", ["make lint"]))
+        return ui
+
+    def test_details_show_under_their_step_without_shifting_the_columns(self):
+        ui = self.make_ui()
+        ui.start("review", "review")
+        ui.details("review", ["[auto-fix] " + "x" * 100, *[f"[auto-fix] {n}" for n in range(10)]])
+        ui.done("review", "risk: low")
+        lines = self.render(ui).splitlines()
+        review = next(index for index, line in enumerate(lines) if "review" in line)
+        self.assertIn("risk: low", lines[review])
+        self.assertTrue(lines[review + 1].startswith("    [auto-fix] xxx"))
+        self.assertIn("... 6 more", lines[review + 6])
+        self.assertEqual(lines[review + 7].index("check"), lines[review].index("review"))
+        self.assertTrue(all(len(line) <= 60 for line in lines))
+
+    def test_restart_shows_the_attempt_and_resets_the_steps(self):
+        ui = self.make_ui()
+        ui.start("review", "review")
+        ui.restart(2, 4, "fixed 1 review finding(s)")
+        text = self.render(ui)
+        self.assertIn("↻ review", text)
+        self.assertIn("attempt 2/4 - fixed 1 review finding(s)", text)
+        self.assertIn("· review", text.split("attempt 2/4")[1])
 
 
 if __name__ == "__main__":

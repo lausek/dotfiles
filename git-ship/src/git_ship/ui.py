@@ -3,10 +3,11 @@
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-StepState = Literal["pending", "running", "done", "skipped", "failed"]
+StepState = Literal["pending", "running", "done", "fixed", "skipped", "failed"]
+"""fixed: the step fixed something, so the pipeline started over."""
 
 
 @dataclass(frozen=True)
@@ -23,8 +24,7 @@ class Ui(Protocol):
     def plan(self, steps: Sequence[PlannedStep]) -> None:
         """The steps ahead, in order. Called again when more is known, e.g. the checks after detecting them."""
 
-    def start(self, key: str, title: str) -> None:
-        """Starts a step, or its next round under a new title."""
+    def start(self, key: str, title: str) -> None: ...
 
     def done(self, key: str, note: str = "") -> None: ...
 
@@ -33,8 +33,14 @@ class Ui(Protocol):
     def status(self, text: str) -> None:
         """What the running step does right now. The TUI replaces it with the next status."""
 
+    def details(self, key: str, lines: Sequence[str]) -> None:
+        """What a step found, e.g. the review's findings. The TUI shows them under the step."""
+
     def log(self, text: str) -> None:
-        """Output to keep, e.g. findings or the PR link."""
+        """Output to keep that belongs to no step, e.g. the output of a failing check."""
+
+    def restart(self, attempt: int, attempts: int, reason: str) -> None:
+        """The pipeline starts over from the top after a fix."""
 
     def ask(self, question: str) -> str: ...
 
@@ -61,8 +67,15 @@ class PlainUi:
     def status(self, text: str) -> None:
         print(text, flush=True)
 
+    def details(self, key: str, lines: Sequence[str]) -> None:
+        for line in lines:
+            print(line, flush=True)
+
     def log(self, text: str) -> None:
         print(text, flush=True)
+
+    def restart(self, attempt: int, attempts: int, reason: str) -> None:
+        print(f"\n\033[1m=== {reason} - starting over (attempt {attempt}/{attempts})\033[0m", flush=True)
 
     def ask(self, question: str) -> str:
         return input(question)
@@ -74,6 +87,7 @@ class Step:
     title: str
     state: StepState = "pending"
     note: str = ""
+    details: list[str] = field(default_factory=list)
     started: float | None = None
     finished: float | None = None
 
@@ -88,6 +102,8 @@ class Progress:
 
     def __init__(self, now: Callable[[], float] = time.monotonic):
         self.steps: list[Step] = []
+        self.attempt = ""
+        """Which attempt runs and why, empty on the first."""
         self._now = now
 
     def plan(self, planned: Sequence[PlannedStep]) -> None:
@@ -104,12 +120,12 @@ class Progress:
 
     def start(self, key: str, title: str) -> None:
         step = self._get(key, title)
-        if step.state != "running":
-            step.started = self._now()
-            step.finished = None
         step.title = title
         step.state = "running"
         step.note = ""
+        step.details = []
+        step.started = self._now()
+        step.finished = None
 
     def done(self, key: str, note: str = "") -> None:
         self._finish(key, "done", note)
@@ -117,19 +133,34 @@ class Progress:
     def skip(self, key: str, note: str = "") -> None:
         self._finish(key, "skipped", note)
 
+    def details(self, key: str, lines: Sequence[str]) -> None:
+        self._get(key, key).details = list(lines)
+
+    def end_running(self, state: StepState, note: str | None = None) -> None:
+        for step in self.steps:
+            if step.state == "running":
+                step.state = state
+                step.finished = self._now()
+                if note is not None:
+                    step.note = note
+
+    def restart(self, attempt: int, attempts: int, reason: str) -> None:
+        """Every step is ahead again, in the same order."""
+        self.attempt = f"attempt {attempt}/{attempts} - {reason}"
+        for step in self.steps:
+            step.state = "pending"
+            step.note = ""
+            step.details = []
+            step.started = None
+            step.finished = None
+
     def status(self, text: str) -> None:
         running = self.running()
         if running:
             running.note = text
 
-    def fail_running(self) -> None:
-        for step in self.steps:
-            if step.state == "running":
-                step.state = "failed"
-                step.finished = self._now()
-
     def running(self) -> Step | None:
-        """The step started last of those still running, e.g. the merge that CI ran into."""
+        """The step started last of those still running."""
         running = [step for step in self.steps if step.state == "running"]
         return max(running, key=lambda step: step.started or 0, default=None)
 

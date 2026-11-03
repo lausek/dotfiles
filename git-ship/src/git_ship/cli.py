@@ -1,6 +1,8 @@
 """git ship - validate the current branch in a disposable worktree, then push, open a PR and watch CI.
 
-  resolve conflicts -> detect checks -> review -> fix -> checks -> fix -> push -> PR -> CI -> fix (GitHub or Azure DevOps)
+  resolve conflicts -> detect checks -> review -> checks -> push -> PR -> CI (GitHub or Azure DevOps)
+
+When a step fixes something, the fix is committed and the pipeline starts over from the top.
 
 On the first run, claude detects the local checks (install, lint, tests) and saves them to
 .git/ship.json. They are detected again when the files they came from change.
@@ -19,20 +21,10 @@ from .config import Config, config_path, load_config, read_config_file
 from .git import Git, worktree
 from .hosts import Host, detect_host
 from .models import Assessment, Change, Check, Detection, Finding, Ticket
-from .pipeline import (
-    Decide,
-    Decision,
-    Run,
-    check_key,
-    checks_step,
-    ci_step,
-    merge_step,
-    push,
-    review_step,
-)
+from .pipeline import Decide, Decision, Run, Target, ship_pipeline
 from .report import with_assessment
 from .shell import NeedsDecision, ShipError, run
-from .ui import PlainUi, PlannedStep, Ui
+from .ui import PlainUi, Ui
 
 
 def main() -> int:
@@ -117,79 +109,30 @@ def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: st
 
     with worktree(repo) as wt:
         start = wt("rev-parse", "HEAD")
+        validation = Run(
+            worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base,
+            ui=ui,
+        )
+        target = Target(
+            branch=branch,
+            host=host,
+            ci_timeout=config.ci_timeout_minutes * 60,
+            resolve_checks=lambda: resolve_checks(config_file, wt.cwd, validation.agent, approve, redetect, ui),
+            open_pr=lambda assessment: open_pr(ui, host, validation, assessment, branch, config.base),
+        )
         with ui.session():
-            ci_checks, detection = _pipeline(ui, wt, change, config, config_file, approve, decide, redetect, host, branch)
+            shipped = ship_pipeline(validation, target)
 
         # After the session, so they show below the TUI's steps.
         if host is None:
             print(f"unknown host for {remote_url} - pushed, open the PR yourself")
-        warning = untested_warning(detection, host, config, ci_checks)
+        warning = untested_warning(shipped.detection, host, config, shipped.ci_checks)
         if warning:
             print(f"\nwarning: {warning}", file=sys.stderr)
 
         fixes = wt.subjects(f"{start}..HEAD")
         if fixes:
             print(f"\nship added {len(fixes)} commit(s) - run 'git pull --ff-only' on {branch}")
-
-
-def _pipeline(
-    ui: Ui,
-    wt: Git,
-    change: Change,
-    config: Config,
-    config_file: Path,
-    approve: Approve,
-    decide: Decide,
-    redetect: bool,
-    host: Host | None,
-    branch: str,
-) -> tuple[list[Check], Detection]:
-    validation = Run(
-        worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base, ui=ui
-    )
-    ui.plan(plan(config.base, branch, checks=None))
-    if not merge_step(validation):
-        ui.skip("merge", "no conflicts")
-    detection = resolve_checks(config_file, wt.cwd, validation.agent, approve, force=redetect, ui=ui)
-    ui.plan(plan(config.base, branch, detection.checks))
-    if not detection.checks:
-        ui.skip("checks", "none detected")
-    assessment = review_step(validation)
-    checks_step(validation, detection.checks)
-
-    ui.start("push", f"push {branch}")
-    push(wt, branch)
-    ui.done("push")
-
-    if host is None:
-        ui.skip("pr", "unknown host, open it yourself")
-        ui.skip("ci", "unknown host")
-        return [], detection
-
-    ui.start("pr", "pull request")
-    ui.done("pr", open_pr(ui, host, validation, assessment, branch, config.base))
-    if config.ci_timeout_minutes <= 0:
-        ui.skip("ci", "disabled (ci_timeout_minutes: 0)")
-        return [], detection
-    ci_checks = ci_step(validation, host, branch, lambda: push(wt, branch), config.ci_timeout_minutes * 60)
-    return ci_checks, detection
-
-
-def plan(base: str, branch: str, checks: Sequence[str] | None) -> list[PlannedStep]:
-    """The steps ahead. The checks are one step until they are known."""
-    if checks:
-        check_steps = [PlannedStep(check_key(index), f"check: {command}") for index, command in enumerate(checks)]
-    else:
-        check_steps = [PlannedStep("checks", "checks")]
-    return [
-        PlannedStep("merge", f"merge origin/{base}"),
-        PlannedStep("detect", "detect checks"),
-        PlannedStep("review", "review"),
-        *check_steps,
-        PlannedStep("push", f"push {branch}"),
-        PlannedStep("pr", "pull request"),
-        PlannedStep("ci", "CI"),
-    ]
 
 
 def untested_warning(detection: Detection, host: Host | None, config: Config, ci_checks: list[Check]) -> str | None:
