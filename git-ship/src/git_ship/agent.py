@@ -22,11 +22,13 @@ FINDINGS_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["file", "summary", "action"],
+                "required": ["file", "summary", "detail", "action"],
                 "properties": {
                     "file": {"type": "string"},
                     "line": {"type": "integer"},
                     "summary": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "question": {"type": "string"},
                     "action": {"type": "string", "enum": ["auto-fix", "ask-user"]},
                 },
             },
@@ -98,6 +100,14 @@ Mark a finding 'auto-fix' only if the fix is mechanical and unambiguous. If the 
 behavior or intent in a way the author has to decide, mark it 'ask-user'.
 Return an empty list if the change is fine.
 
+The author decides on the findings from a terminal prompt, without opening the code. Write each so it is
+understood at a glance:
+- summary: what goes wrong for users or operators, in plain words, at most 12 words. No code identifiers,
+  file names or ids. E.g. "Deploy fails: the migrations have two heads after merging main".
+- question: only for 'ask-user'. The decision in one short question naming the options, at most 15 words.
+  E.g. "Migrate the old chat events, or accept that old chats lose their visuals?"
+- detail: everything else - evidence, affected code, the suggested fix. The fixer works from it.
+
 Then assess how carefully a human has to review this change before merging:
 - 'low': well-bounded, mostly cosmetic or straightforward with little ambiguity. A quick look is enough.
 - 'medium': touches behavior that matters, safe to merge once the risky parts were checked.
@@ -129,6 +139,8 @@ Report code in the change that goes against them as 'ask-user' findings."""
                 line=item.get("line"),
                 summary=item["summary"],
                 needs_user=item["action"] == "ask-user",
+                detail=item.get("detail", ""),
+                question=item.get("question"),
             )
             for item in output["findings"]
         ]

@@ -616,6 +616,44 @@ class PromptDecisionTest(unittest.TestCase):
         self.assertEqual(ui.details, ["[auto-fix] m.py:2 - off by one", "[ask-user] m.py:5 - should this raise?"])
         self.assertIn("1 finding(s) need your decision, the 1 auto-fix one(s) are fixed either way", ui.question)
 
+    def test_shows_the_short_form_and_the_detail_on_request(self):
+        finding = Finding(
+            file="src/deep/m.py",
+            line=5,
+            summary="Old chats lose their visuals",
+            needs_user=True,
+            detail="TOOL_VIEWS only knows the new tool name. Migrate the stored events.",
+            question="Migrate them, or accept it?",
+        )
+
+        class Asking(PlainUi):
+            def __init__(self):
+                self.answers = ["d", "f"]
+                self.details: list[list[str]] = []
+                self.logged: list[str] = []
+
+            def ask(self, question: str, details=()) -> str:
+                self.details.append(list(details))
+                return self.answers.pop(0)
+
+            def log(self, text: str) -> None:
+                self.logged.append(text)
+
+        ui = Asking()
+        self.assertEqual(prompt_decision(ui, [finding]), "fix")
+        short = "[ask-user] m.py:5 - Old chats lose their visuals → Migrate them, or accept it?"
+        self.assertEqual(ui.details, [[short], [short]])
+        self.assertEqual(ui.logged, [f"{short}\nsrc/deep/m.py:5\n{finding.detail}"])
+        self.assertIn(finding.detail, str(finding), "the fixer gets the detail")
+
+    def test_anything_else_aborts(self):
+        class Asking(PlainUi):
+            def ask(self, question: str, details=()) -> str:
+                return "x"
+
+        with self.assertRaises(ShipError):
+            prompt_decision(Asking(), [DECISION])
+
 
 
 class MemoryTest(unittest.TestCase):

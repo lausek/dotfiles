@@ -214,17 +214,22 @@ def prompt_decision(ui: Ui, findings: Sequence[Finding]) -> Decision:
     asks = [finding for finding in findings if finding.needs_user]
     auto_fixes = len(findings) - len(asks)
     either_way = f", the {auto_fixes} auto-fix one(s) are fixed either way" if auto_fixes else ""
-    # The findings come with the question: the TUI takes its step list down while it asks.
-    answer = ui.ask(
-        f"{len(asks)} finding(s) need your decision{either_way}. [f]ix them, [k]eep them as they are, [a]bort? ",
-        details=[finding.tagged() for finding in findings],
-    )
-    match answer.strip().lower():
-        case "f":
-            return "fix"
-        case "k":
-            return "keep"
-    raise ShipError("aborted")
+    while True:
+        # The findings come with the question: the TUI takes its step list down while it asks.
+        answer = ui.ask(
+            f"{len(asks)} finding(s) need your decision{either_way}. "
+            "[f]ix them, [k]eep them as they are, show [d]etails, [a]bort? ",
+            details=[finding.tagged() for finding in findings],
+        )
+        match answer.strip().lower():
+            case "f":
+                return "fix"
+            case "k":
+                return "keep"
+            case "d":
+                ui.log("\n\n".join(finding.explained() for finding in findings))
+            case _:
+                raise ShipError("aborted")
 
 
 def needs_decision(findings: Sequence[Finding]) -> Decision:

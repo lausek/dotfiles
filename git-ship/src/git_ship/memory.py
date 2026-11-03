@@ -83,4 +83,11 @@ class Memory:
 
 
 def _finding(item: dict[str, Any]) -> Finding:
-    return Finding(file=item["file"], line=item.get("line"), summary=item["summary"], needs_user=item["needs_user"])
+    return Finding(
+        file=item["file"],
+        line=item.get("line"),
+        summary=item["summary"],
+        needs_user=item["needs_user"],
+        detail=item.get("detail", ""),
+        question=item.get("question"),
+    )
