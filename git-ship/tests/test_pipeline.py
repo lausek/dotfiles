@@ -187,13 +187,25 @@ class PipelineTest(unittest.TestCase):
         )
         return ship_pipeline(self.make_run(wt, agent, decide), target, FakeClock())
 
-    def test_auto_fixes_are_committed_and_not_reviewed_again(self):
+    def test_auto_fixes_are_committed_and_only_the_fix_is_reviewed_again(self):
         with worktree(self.repo) as wt:
-            agent = FakeAgent(wt.cwd, [[BUG], [BUG]])
+            start = wt("rev-parse", "HEAD")
+            agent = FakeAgent(wt.cwd, [[BUG]])
             self.ship(wt, agent)
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: address review findings"])
-            self.assertEqual(agent.since_per_round, [None])
+            self.assertEqual(agent.since_per_round, [None, start])
             self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
+
+    def test_out_of_rounds_findings_go_to_the_pr_instead_of_failing(self):
+        with worktree(self.repo) as wt:
+            agent = FakeAgent(wt.cwd, [[BUG], [DECISION], [BUG, DECISION]])
+            prs = []
+            self.ship(
+                wt, agent, host=FakeHost([]), decide=answer("let it crash"),
+                open_pr=lambda assessment: prs.append(assessment) or "url",
+            )
+            self.assertEqual(len(agent.fixes), 2)
+            self.assertEqual(prs[0].kept, [BUG, DECISION])
 
     def test_kept_findings_are_not_fixed_and_remembered(self):
         with worktree(self.repo) as wt:

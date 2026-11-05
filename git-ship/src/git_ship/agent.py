@@ -97,7 +97,7 @@ tests_in_ci: true if you left the tests out because CI runs them on pull request
     def review(self, change: Change, kept: Sequence[Finding], since: str | None) -> Review:
         if since is None:
             scope = f"""You are reviewing a change you did not write. Review the full diff `git diff {change.diff_range}`.
-This is the only review of the change: the fixes for your findings are not reviewed again. So report
+This is the only full review of the change: later reviews only look at the fixes for your findings. So report
 every problem you find now, all in this one list. Don't hold anything back for a later round."""
         else:
             scope = f"""You are reviewing a change you did not write. The change, `git diff {change.diff_range}`, was reviewed

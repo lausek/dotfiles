@@ -204,9 +204,9 @@ def _has_conflict_markers(path: Path) -> bool:
 
 def review_step(run: Run, kept: list[Finding]) -> Assessment:
     """Reviews each commit once: the full change the first time, after that only the commits added since, e.g.
-    fixes of failing checks or new commits on a rerun. Fixes of the review's own findings aren't reviewed again,
-    so the review can't go round in circles. Findings to fix are fixed, then the pipeline starts over.
-    Findings the author keeps are added to `kept`, so later reviews don't report them again."""
+    the fixes of its findings or of failing checks, or new commits on a rerun. Findings to fix are fixed, then the
+    pipeline starts over. Findings the author keeps are added to `kept`, so later reviews don't report them again.
+    Out of fix rounds, the findings are kept and listed in the PR instead of failing the run."""
     run.ui.start("review", "review")
     head = run.worktree("rev-parse", "HEAD")
     ticket = run.change.ticket.id if run.change.ticket else ""
@@ -244,6 +244,13 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         run.ui.done("review", f"risk: {review.risk}")
         return assessment
 
+    if run.attempt >= run.attempts:
+        kept += open_findings
+        run.memory.remember_kept(kept)
+        done_up_to(head)
+        run.ui.done("review", f"risk: {review.risk}, out of fix rounds, {len(open_findings)} finding(s) left for the PR")
+        return assessment
+
     to_fix = select_fixes(open_findings, run.decide)
     fixed = [finding for finding, _ in to_fix]
     kept += [finding for finding in open_findings if finding not in fixed]
@@ -253,6 +260,8 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
         return assessment
 
+    # Up to before the fix, so the next review looks at what the fix changed.
+    done_up_to(head)
     commit_fix(
         run,
         problem="still findings",
@@ -260,7 +269,6 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         message="fix: address review findings",
         instructions="\n".join(_instruction(finding, answer) for finding, answer in to_fix),
     )
-    done_up_to(run.worktree("rev-parse", "HEAD"))
     raise Restart(f"fixed {len(to_fix)} review finding(s)")
 
 
