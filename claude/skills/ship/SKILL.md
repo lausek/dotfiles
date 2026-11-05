@@ -18,6 +18,8 @@ Without a task argument, ship the current branch as it is:
 
 ## 2. Run git-ship
 
+If `~/.claude/skills/spinup/spinup.sh` exists, first run it with `--stop` from the branch's checkout: a dev stack started there for this change is done once the change ships.
+
 ```bash
 git ship -y [--ticket <n>]
 ```
