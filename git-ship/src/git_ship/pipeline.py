@@ -4,12 +4,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
-from typing import NoReturn
 
 from .agent import Agent
 from .git import Git
 from .hosts import Host
-from .memory import Memory
+from .memory import Memory, Reviewed
 from .models import Assessment, Change, Check, Detection, Finding
 from .shell import ShipError
 from .ui import PlannedStep, Ui
@@ -204,14 +203,27 @@ def _has_conflict_markers(path: Path) -> bool:
 
 
 def review_step(run: Run, kept: list[Finding]) -> Assessment:
-    """Reviews the full change. Findings to fix are fixed, then the pipeline starts over.
+    """Reviews each commit once: the full change the first time, after that only the commits added since, e.g.
+    fixes of failing checks or new commits on a rerun. Fixes of the review's own findings aren't reviewed again,
+    so the review can't go round in circles. Findings to fix are fixed, then the pipeline starts over.
     Findings the author keeps are added to `kept`, so later reviews don't report them again."""
     run.ui.start("review", "review")
-    key = _review_key(run)
+    head = run.worktree("rev-parse", "HEAD")
+    ticket = run.change.ticket.id if run.change.ticket else ""
+    reviewed = run.memory.reviewed()
+    if reviewed is not None and (reviewed.ticket != ticket or not run.worktree.is_ancestor(reviewed.commit, head)):
+        reviewed = None
+    if reviewed is not None and reviewed.commit == head:
+        run.ui.details("review", [f"risk: {reviewed.risk} - {reviewed.risk_rationale}"])
+        run.ui.done("review", f"risk: {reviewed.risk}, nothing new to review")
+        return Assessment(risk=reviewed.risk, risk_rationale=reviewed.risk_rationale, kept=kept)
+    since = reviewed.commit if reviewed else None
+
+    key = _review_key(run, head, ticket, since)
     review = run.memory.review(key)
     if review is None:
-        run.ui.status("claude reviews the change")
-        review = run.agent.review(run.change, kept)
+        run.ui.status("claude reviews " + ("the change" if since is None else "the commits added since the last review"))
+        review = run.agent.review(run.change, kept, since)
         run.memory.remember_review(key, review)
         source = []
     else:
@@ -223,7 +235,12 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
         "review", [*source, f"risk: {review.risk} - {review.risk_rationale}", *(findings or ["no findings"])]
     )
     assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
+
+    def done_up_to(commit: str) -> None:
+        run.memory.remember_reviewed(Reviewed(commit, ticket, review.risk, review.risk_rationale))
+
     if not open_findings:
+        done_up_to(head)
         run.ui.done("review", f"risk: {review.risk}")
         return assessment
 
@@ -232,26 +249,25 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
     kept += [finding for finding in open_findings if finding not in fixed]
     run.memory.remember_kept(kept)
     if not to_fix:
+        done_up_to(head)
         run.ui.done("review", f"risk: {review.risk}, {len(kept)} finding(s) kept")
         return assessment
 
-    fix(
+    commit_fix(
         run,
         problem="still findings",
         status=f"claude fixes {len(to_fix)} finding(s)",
         message="fix: address review findings",
         instructions="\n".join(_instruction(finding, answer) for finding, answer in to_fix),
-        reason=f"fixed {len(to_fix)} review finding(s)",
     )
-    raise AssertionError("unreachable")
+    done_up_to(run.worktree("rev-parse", "HEAD"))
+    raise Restart(f"fixed {len(to_fix)} review finding(s)")
 
 
-def _review_key(run: Run) -> str:
-    """What the review depends on: the commit, where it meets the base and the ticket."""
-    head = run.worktree("rev-parse", "HEAD")
+def _review_key(run: Run, head: str, ticket: str, since: str | None) -> str:
+    """What the review depends on: the commit, where it meets the base, the ticket and what was reviewed before."""
     merge_base = run.worktree("merge-base", "HEAD", f"origin/{run.base}")
-    ticket = run.change.ticket.id if run.change.ticket else ""
-    return f"{head} {merge_base} {ticket}".strip()
+    return " ".join(part for part in (head, merge_base, ticket, since) if part)
 
 
 def numbered(findings: Sequence[Finding]) -> list[str]:
@@ -293,15 +309,15 @@ def checks_step(run: Run, commands: Sequence[str]) -> None:
             continue
 
         run.ui.log(_tail(result.stdout, 40))
-        fix(
+        commit_fix(
             run,
             problem=f"'{command}' still failing",
             status="claude fixes the failure",
             message=f"fix: make '{command}' pass",
             instructions=f"The command `{command}` fails. Make it pass by fixing the code, "
             f"not by weakening or skipping tests. Output (tail):\n\n{_tail(result.stdout, 200)}",
-            reason=f"fixed '{command}'",
         )
+        raise Restart(f"fixed '{command}'")
 
 
 def ci_step(run: Run, host: Host, branch: str, timeout: float, clock: Clock = SYSTEM_CLOCK) -> list[Check]:
@@ -331,16 +347,15 @@ def ci_step(run: Run, host: Host, branch: str, timeout: float, clock: Clock = SY
         raise ShipError(f"CI still failing after {run.rounds} fix rounds")
     run.ui.status("fetching the logs")
     logs = "\n\n".join(f"# {check.name}\n{_tail(host.failure_log(check), CI_LOG_LINES)}" for check in failed)
-    fix(
+    commit_fix(
         run,
         problem="CI still failing",
         status=f"claude fixes {len(failed)} failed check(s)",
         message=f"fix: make CI pass ({names})",
         instructions="These CI checks fail. Make them pass by fixing the code, not by weakening or skipping tests. "
         "Only change CI configuration if it is clearly the cause. Logs (tail):\n\n" + logs,
-        reason=f"fixed CI ({names})",
     )
-    raise AssertionError("unreachable")
+    raise Restart(f"fixed CI ({names})")
 
 
 def wait_for_checks(host: Host, branch: str, head: str, timeout: float, ui: Ui, clock: Clock) -> list[Check]:
@@ -366,16 +381,15 @@ def wait_for_checks(host: Host, branch: str, head: str, timeout: float, ui: Ui, 
         clock.sleep(CI_POLL_SECONDS)
 
 
-def fix(run: Run, problem: str, status: str, message: str, instructions: str, reason: str) -> NoReturn:
-    """Lets the agent fix, commits the result and starts the pipeline over. Gives up with `problem` when
-    the pipeline already started over as often as it may."""
+def commit_fix(run: Run, problem: str, status: str, message: str, instructions: str) -> None:
+    """Lets the agent fix and commits the result, for the pipeline to start over with. Gives up with `problem`
+    when the pipeline already started over as often as it may."""
     if run.attempt >= run.attempts:
         raise ShipError(f"{problem} after {run.rounds} fix rounds")
     run.ui.status(status)
     untracked_before = run.worktree.untracked()
     run.agent.fix(instructions)
     _commit(run.worktree, untracked_before, message)
-    raise Restart(reason)
 
 
 def _commit(wt: Git, untracked_before: set[str], message: str) -> None:

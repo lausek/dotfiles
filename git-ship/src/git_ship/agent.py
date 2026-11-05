@@ -59,7 +59,9 @@ DETECTION_SCHEMA = {
 class Agent(Protocol):
     def detect_checks(self) -> Detection: ...
 
-    def review(self, change: Change, kept: Sequence[Finding]) -> Review: ...
+    def review(self, change: Change, kept: Sequence[Finding], since: str | None) -> Review:
+        """Reviews the full change, or with `since` only the commits after it."""
+        ...
 
     def fix(self, instructions: str) -> None: ...
 
@@ -92,8 +94,17 @@ tests_in_ci: true if you left the tests out because CI runs them on pull request
         output = self._structured(prompt, DETECTION_SCHEMA, READ_ONLY_TOOLS)
         return Detection(checks=output["checks"], sources=output["sources"], tests_in_ci=output["tests_in_ci"])
 
-    def review(self, change: Change, kept: Sequence[Finding]) -> Review:
-        prompt = f"""You are reviewing a change you did not write. Review the full diff `git diff {change.diff_range}`.
+    def review(self, change: Change, kept: Sequence[Finding], since: str | None) -> Review:
+        if since is None:
+            scope = f"""You are reviewing a change you did not write. Review the full diff `git diff {change.diff_range}`.
+This is the only review of the change: the fixes for your findings are not reviewed again. So report
+every problem you find now, all in this one list. Don't hold anything back for a later round."""
+        else:
+            scope = f"""You are reviewing a change you did not write. The change, `git diff {change.diff_range}`, was reviewed
+up to commit {since} already. Review only what the commits after it changed: `git log -p --cc {since}..HEAD`
+(a merge commit shows only how its conflicts were resolved). Read the full change only for context and report
+only problems these commits bring in. Report all of them now, in this one list."""
+        prompt = f"""{scope}
 Report only real problems: bugs, broken edge cases, security issues, missing error handling,
 violations of the repo's conventions (CLAUDE.md / AGENTS.md). No style nitpicks, no praise.
 Mark a finding 'auto-fix' only if the fix is mechanical and unambiguous. If the fix changes
@@ -108,7 +119,7 @@ understood at a glance:
   E.g. "Migrate the old chat events, or accept that old chats lose their visuals?"
 - detail: everything else - evidence, affected code, the suggested fix. The fixer works from it.
 
-Then assess how carefully a human has to review this change before merging:
+Then assess how carefully a human has to review the full change before merging:
 - 'low': well-bounded, mostly cosmetic or straightforward with little ambiguity. A quick look is enough.
 - 'medium': touches behavior that matters, safe to merge once the risky parts were checked.
 - 'high': fundamental, risky or ambiguous. Must not be merged without an in-depth review.

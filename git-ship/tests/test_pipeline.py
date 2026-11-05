@@ -57,6 +57,7 @@ class FakeAgent:
         self.cwd = cwd
         self.reviews = reviews
         self.kept_per_round: list[list[Finding]] = []
+        self.since_per_round: list[str | None] = []
         self.fixes: list[str] = []
         self.detections = 0
 
@@ -64,8 +65,9 @@ class FakeAgent:
         self.detections += 1
         return Detection(checks=["make test"], sources=["Makefile"])
 
-    def review(self, change: Change, kept: Sequence[Finding]) -> Review:
+    def review(self, change: Change, kept: Sequence[Finding], since: str | None) -> Review:
         self.kept_per_round.append(list(kept))
+        self.since_per_round.append(since)
         findings = self.reviews.pop(0) if self.reviews else []
         return Review(findings=findings, risk="medium", risk_rationale="touches m.py")
 
@@ -185,19 +187,19 @@ class PipelineTest(unittest.TestCase):
         )
         return ship_pipeline(self.make_run(wt, agent, decide), target, FakeClock())
 
-    def test_auto_fixes_are_committed_and_reviewed_again(self):
+    def test_auto_fixes_are_committed_and_not_reviewed_again(self):
         with worktree(self.repo) as wt:
-            agent = FakeAgent(wt.cwd, [[BUG]])
+            agent = FakeAgent(wt.cwd, [[BUG], [BUG]])
             self.ship(wt, agent)
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: address review findings"])
-            self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(agent.since_per_round, [None])
             self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
 
-    def test_kept_findings_are_passed_to_next_review(self):
+    def test_kept_findings_are_not_fixed_and_remembered(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [[BUG, DECISION]])
             self.ship(wt, agent, decide=answer("keep"))
-            self.assertEqual(agent.kept_per_round[1], [DECISION])
+            self.assertEqual(self.memory().kept(), [DECISION])
             self.assertNotIn("should this raise", agent.fixes[0])
 
     def test_the_fixer_gets_the_authors_answer(self):
@@ -209,17 +211,37 @@ class PipelineTest(unittest.TestCase):
 
     def test_gives_up_after_rounds(self):
         with worktree(self.repo) as wt:
-            agent = FakeAgent(wt.cwd, [[BUG], [BUG], [BUG]])
-            with self.assertRaisesRegex(ShipError, "still findings after 2 fix rounds"):
-                self.ship(wt, agent)
+            agent = FakeAgent(wt.cwd, [])
+            with self.assertRaisesRegex(ShipError, "'false' still failing after 2 fix rounds"):
+                self.ship(wt, agent, checks=["false"])
             self.assertEqual(len(agent.fixes), 2)
 
-    def test_check_fix_is_reviewed_and_checked_again(self):
+    def test_check_fix_is_reviewed_on_its_own_and_checked_again(self):
         with worktree(self.repo) as wt:
             agent = FakeAgent(wt.cwd, [])
+            start = wt("rev-parse", "HEAD")
             self.ship(wt, agent, checks=["true", "test -f fixed"])
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: make 'test -f fixed' pass"])
-            self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(agent.since_per_round, [None, start])
+
+    def test_rerun_without_new_commits_does_not_review_again(self):
+        with worktree(self.repo) as wt:
+            self.ship(wt, FakeAgent(wt.cwd, [[BUG]]))
+            agent = FakeAgent(wt.cwd, [[BUG]])
+            self.ship(wt, agent)
+            self.assertEqual(agent.since_per_round, [])
+
+    def test_reviews_in_full_when_the_reviewed_commit_is_gone(self):
+        with worktree(self.repo) as wt:
+            (wt.cwd / "new").write_text("new")
+            wt("add", "-A")
+            wt("commit", "-qm", "new")
+            self.ship(wt, FakeAgent(wt.cwd, []))
+            wt("commit", "-q", "--amend", "-m", "reworded")
+            self.repo("branch", "-D", "b")  # the push never forces
+            agent = FakeAgent(wt.cwd, [])
+            self.ship(wt, agent)
+            self.assertEqual(agent.since_per_round, [None])
 
     def test_check_artifacts_are_not_committed(self):
         with worktree(self.repo) as wt:
@@ -245,7 +267,7 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(shipped.ci_checks, [passed])
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["fix: make CI pass (build)"])
             self.assertIn("log of build", agent.fixes[0])
-            self.assertEqual(len(agent.kept_per_round), 2)
+            self.assertEqual(len(agent.since_per_round), 2)
             self.assertEqual(self.repo("rev-parse", "b"), wt("rev-parse", "HEAD"))
 
     def test_ci_without_checks_is_skipped_after_grace(self):

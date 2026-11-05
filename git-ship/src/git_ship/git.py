@@ -49,6 +49,10 @@ class Git:
         self("reset", "-q", "--hard", "HEAD")
         return []
 
+    def is_ancestor(self, commit: str, of: str) -> bool:
+        """False also when `commit` doesn't exist (anymore)."""
+        return self.try_("merge-base", "--is-ancestor", commit, of) is not None
+
     def unmerged(self) -> list[str]:
         return self("diff", "--name-only", "--diff-filter=U").splitlines()
 

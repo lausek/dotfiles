@@ -3,19 +3,30 @@
 - the last review and the commit it reviewed, so a rerun on the same commit asks about the same findings
   instead of reviewing again
 - the findings you kept, so later reviews of the branch don't report them again
+- up to which commit the branch was reviewed, so each commit is reviewed once
 
 It is only a cache: if the file is unreadable, git-ship starts from scratch.
 """
 
 import json
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import Finding, Review
+from .models import Finding, Review, Risk
 
 VERSION = 1
+
+
+@dataclass(frozen=True)
+class Reviewed:
+    """The branch was reviewed up to `commit`, for `ticket`. Fixes of the review's findings count as reviewed."""
+
+    commit: str
+    ticket: str
+    risk: Risk
+    risk_rationale: str
 
 
 class Memory:
@@ -48,6 +59,16 @@ class Memory:
 
     def remember_review(self, key: str, review: Review) -> None:
         self._update(review={"key": key, **asdict(review)})
+
+    def reviewed(self) -> Reviewed | None:
+        saved = self._entry().get("reviewed")
+        try:
+            return Reviewed(**saved) if isinstance(saved, dict) else None
+        except TypeError:
+            return None
+
+    def remember_reviewed(self, reviewed: Reviewed) -> None:
+        self._update(reviewed=asdict(reviewed))
 
     def forget_other_branches(self, branches: Iterable[str]) -> None:
         """Drops what it remembers of branches that no longer exist."""

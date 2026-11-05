@@ -7,9 +7,14 @@ resolve conflicts -> review -> checks -> push -> PR -> CI
 ```
 
 Whenever a step fixes something, the fix is committed and the pipeline starts over from the top. So every
-commit git-ship pushes was reviewed and checked, including fixes for failing checks and CI.
+commit git-ship pushes was checked, and every commit was reviewed except the fixes of review findings.
 
 - The review runs in a fresh `claude -p` session that can only read. Findings are `auto-fix` (fixed and committed) or `ask-user` (you decide). Each shows as one short line you can decide on without opening the code. An `ask-user` finding ends with a question, you answer it in your own words and the fixer does what you said. `[d]etails` in the prompt shows the evidence and the suggested fix.
+- Each commit is reviewed once. The first review covers the full change and has to report everything in one go,
+  because the fixes for its findings aren't reviewed again. So the review can't keep coming back with more.
+  After that, the review only looks at commits added since: fixes of failing checks or CI, a merge that resolved
+  conflicts, new commits on a rerun. A rerun without new commits doesn't review at all. If the reviewed commit is
+  no longer part of the branch (rebase, amend) or the ticket changed, the full change is reviewed again.
 - Findings you choose to keep are passed to the next reviews, so they aren't reported again. This holds across runs too.
 - The commits git-ship adds go onto your local branch, also when it fails or you abort it. A rerun goes on from there.
   If the branch moved in the meantime or uncommitted changes are in the way, they go to `ship/<branch>` instead.
