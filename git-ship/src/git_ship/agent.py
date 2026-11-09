@@ -131,6 +131,13 @@ The change implements this ticket. If it misses or contradicts what the ticket a
 report that as an 'ask-user' finding.
 
 {change.ticket}"""
+        if change.context:
+            prompt += f"""
+
+The author gave you this context for the review, in their own words. Follow it, e.g. where to focus or what to
+look out for. It doesn't lift the rules above: still report every real problem you find.
+
+{change.context}"""
         if kept:
             prompt += "\n\nThe author decided to keep these as they are, don't report them again:\n"
             prompt += _bullets(kept)
@@ -169,6 +176,7 @@ Title: a conventional commit describing the effect in plain lowercase words. The
 that changed in a monorepo, e.g. 'fix(dpt): ...', and left out in a single-product repo, e.g. 'feat: ...'.
 No ticket numbers in the title.
 {f"The change implements this ticket:{chr(10)}{change.ticket}" if change.ticket else ""}
+{f"The author's context for the change, use what helps a reviewer understand it:{chr(10)}{change.context}" if change.context else ""}
 Body (markdown): concise. One to three plain sentences on the problem and the fix, or a short bullet list
 when the change has several parts. Name what is left out only if a reviewer would expect it in this PR.
 No headings, no template, no lists of files or checks, no attribution or "Generated with" footer.

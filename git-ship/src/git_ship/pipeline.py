@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -210,8 +211,12 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
     run.ui.start("review", "review")
     head = run.worktree("rev-parse", "HEAD")
     ticket = run.change.ticket.id if run.change.ticket else ""
+    context = run.change.context
     reviewed = run.memory.reviewed()
-    if reviewed is not None and (reviewed.ticket != ticket or not run.worktree.is_ancestor(reviewed.commit, head)):
+    # A different ticket or context asks for a different review, so the full change is reviewed again.
+    if reviewed is not None and (
+        reviewed.ticket != ticket or reviewed.context != context or not run.worktree.is_ancestor(reviewed.commit, head)
+    ):
         reviewed = None
     if reviewed is not None and reviewed.commit == head:
         run.ui.details("review", [f"risk: {reviewed.risk} - {reviewed.risk_rationale}"])
@@ -237,7 +242,7 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
     assessment = Assessment(risk=review.risk, risk_rationale=review.risk_rationale, kept=kept)
 
     def done_up_to(commit: str) -> None:
-        run.memory.remember_reviewed(Reviewed(commit, ticket, review.risk, review.risk_rationale))
+        run.memory.remember_reviewed(Reviewed(commit, ticket, review.risk, review.risk_rationale, context))
 
     if not open_findings:
         done_up_to(head)
@@ -273,9 +278,11 @@ def review_step(run: Run, kept: list[Finding]) -> Assessment:
 
 
 def _review_key(run: Run, head: str, ticket: str, since: str | None) -> str:
-    """What the review depends on: the commit, where it meets the base, the ticket and what was reviewed before."""
+    """What the review depends on: the commit, where it meets the base, the ticket, the context and what was
+    reviewed before."""
     merge_base = run.worktree("merge-base", "HEAD", f"origin/{run.base}")
-    return " ".join(part for part in (head, merge_base, ticket, since) if part)
+    context = hashlib.sha256(run.change.context.encode()).hexdigest()[:12] if run.change.context else ""
+    return " ".join(part for part in (head, merge_base, ticket, context, since) if part)
 
 
 def numbered(findings: Sequence[Finding]) -> list[str]:

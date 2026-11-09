@@ -1,7 +1,7 @@
 ---
 name: ship
 description: Validate and ship a branch with git-ship (independent review, local checks, push, PR, CI fixes). Use when the user says "ship", "/ship", "ship it", "open a PR", or wants a task implemented and shipped.
-argument-hint: "[task]"
+argument-hint: "[task] [review context]"
 ---
 
 # Ship
@@ -21,10 +21,12 @@ Without a task argument, ship the current branch as it is:
 If `~/.claude/skills/spinup/spinup.sh` exists, first run it with `--stop` from the branch's checkout: a dev stack started there for this change is done once the change ships.
 
 ```bash
-git ship -y [--ticket <n>]
+git ship -y [--ticket <n>] [--context "<text>"]
 ```
 
 Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work item. git-ship gives it to the reviewer, which then also checks the change against it, and links it to the PR so merging closes it.
+
+Pass `--context` when the user said something for the review: what to focus on (e.g. "focus on simplifying and security"), what to look out for, or background the reviewer needs. Use their words, quoted for the shell. Don't make up a context on your own.
 
 - Always run it with `run_in_background: true`. Waiting for CI can take up to an hour. You get notified when it exits, don't poll.
 - Don't review or fix the change yourself, before or after. git-ship validates in sessions that didn't write the code, that's the point.
@@ -42,7 +44,7 @@ Pass `--ticket` when the change implements a GitHub issue or Azure DevOps work i
 - the question: the finding's question as git-ship wrote it, with the short summary as context. Use the detail only to make the options concrete, the user decides without reading code.
 - the options: the choices the question names, then "Keep as is". The user can always answer in their own words via "Other".
 
-Then rerun in the background with one `--answer N=<answer>` per finding: the chosen option or the user's own words as they wrote them, `keep` for "Keep as is". Quote each argument for the shell.
+Then rerun in the background with the same `--ticket` and `--context` as before and one `--answer N=<answer>` per finding: the chosen option or the user's own words as they wrote them, `keep` for "Keep as is". Quote each argument for the shell.
 
 The rerun reuses the review it stopped on, so the numbers refer to the same findings. If it stops with exit 2 once more, ask again. Never answer for the user.
 

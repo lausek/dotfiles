@@ -155,8 +155,8 @@ class PipelineTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make_run(self, wt: Git, agent: FakeAgent, decide=None) -> Run:
-        change = Change("HEAD~1..HEAD", None)
+    def make_run(self, wt: Git, agent: FakeAgent, decide=None, context: str = "") -> Run:
+        change = Change("HEAD~1..HEAD", None, context)
         return Run(
             worktree=wt, agent=agent, change=change, rounds=2, decide=decide or answer(), base="main", ui=PlainUi(),
             memory=self.memory(),
@@ -177,7 +177,9 @@ class PipelineTest(unittest.TestCase):
         self.repo("commit", "-qm", "theirs")
         self.repo("checkout", "-q", "feature")
 
-    def ship(self, wt: Git, agent: FakeAgent, checks=(), host=None, decide=None, open_pr=None) -> Shipped:
+    def ship(
+        self, wt: Git, agent: FakeAgent, checks=(), host=None, decide=None, open_pr=None, context: str = ""
+    ) -> Shipped:
         target = Target(
             branch="b",
             host=host,
@@ -185,7 +187,7 @@ class PipelineTest(unittest.TestCase):
             resolve_checks=lambda: Detection(checks=list(checks), sources=[]),
             open_pr=open_pr or (lambda assessment: "url"),
         )
-        return ship_pipeline(self.make_run(wt, agent, decide), target, FakeClock())
+        return ship_pipeline(self.make_run(wt, agent, decide, context), target, FakeClock())
 
     def test_auto_fixes_are_committed_and_only_the_fix_is_reviewed_again(self):
         with worktree(self.repo) as wt:
@@ -242,6 +244,16 @@ class PipelineTest(unittest.TestCase):
             agent = FakeAgent(wt.cwd, [[BUG]])
             self.ship(wt, agent)
             self.assertEqual(agent.since_per_round, [])
+
+    def test_reviews_in_full_again_when_the_context_changes(self):
+        with worktree(self.repo) as wt:
+            self.ship(wt, FakeAgent(wt.cwd, []), context="focus on security")
+            same = FakeAgent(wt.cwd, [])
+            self.ship(wt, same, context="focus on security")
+            self.assertEqual(same.since_per_round, [])
+            changed = FakeAgent(wt.cwd, [])
+            self.ship(wt, changed, context="focus on simplicity")
+            self.assertEqual(changed.since_per_round, [None])
 
     def test_reviews_in_full_when_the_reviewed_commit_is_gone(self):
         with worktree(self.repo) as wt:

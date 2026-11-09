@@ -44,6 +44,10 @@ def main() -> int:
         "--keep-asks", action="store_true", help="keep the findings that need a human decision and got no --answer",
     )
     parser.add_argument("--ticket", type=_ticket_id, help="GitHub issue or Azure DevOps work item the change implements")
+    parser.add_argument(
+        "--context", default="", metavar="TEXT",
+        help="context for the review in your words, e.g. what to focus on. Pass the same on reruns",
+    )
     parser.add_argument("--setup", action="store_true", help="detect the checks again")
     parser.add_argument(
         "--plain", action="store_true",
@@ -60,6 +64,7 @@ def main() -> int:
                 approve=accept if args.yes else lambda question: confirm(ui, question),
                 redetect=args.setup,
                 ticket_id=args.ticket,
+                context=args.context.strip(),
             )
     except NeedsDecision as error:
         print(f"ship: {error}", file=sys.stderr)
@@ -102,7 +107,9 @@ def _answer(value: str) -> tuple[int, str]:
     return int(number), text.strip()
 
 
-def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None) -> None:
+def ship(
+    ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: str | None, context: str
+) -> None:
     repo = Git(Path(run("git", "rev-parse", "--show-toplevel")))
     config_file = config_path(repo)
     config = load_config(repo, read_config_file(config_file))
@@ -116,7 +123,9 @@ def ship(ui: Ui, decide: Decide, approve: Approve, redetect: bool, ticket_id: st
         raise ShipError(f"no commits ahead of origin/{config.base}")
 
     # Three dots: the diff from where the branch last met the base, so a merge of the base doesn't show up in it.
-    change = Change(diff_range=f"origin/{config.base}...HEAD", ticket=_fetch_ticket(host, ticket_id))
+    change = Change(
+        diff_range=f"origin/{config.base}...HEAD", ticket=_fetch_ticket(host, ticket_id), context=context
+    )
 
     memory = Memory(config_file.with_name("ship-state.json"), branch)
     memory.forget_other_branches(repo("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines())

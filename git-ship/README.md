@@ -41,6 +41,7 @@ git ship -y             # never asks, exits with 2 on those instead and lists th
 git ship -y --answer "1=migrate the old events" --answer 2=keep  # answers [ask-user #1] and #2
 git ship -y --keep-asks # keep them as they are, they are listed in the PR
 git ship --ticket 1234  # the change implements this issue / work item
+git ship --context "focus on security and on what can be simpler"  # tells the reviewer what to look at
 git ship --plain        # log the steps instead of the live step list
 ```
 
@@ -52,6 +53,11 @@ the steps as they happen instead. No setting needed, the same check git uses for
 
 `--ticket` hands the GitHub issue or Azure DevOps work item to the reviewer, which then also checks the
 change against it, and links it to the PR so merging closes it.
+
+`--context` hands the reviewer whatever it should know or look at, in your words: what to focus on, what to look
+out for, background the diff doesn't show. The reviewer follows it but still reports every real problem it finds.
+The PR description uses it too, where it helps a reviewer. A rerun with a different context, or none, reviews the
+full change again, so pass the same one when you rerun with `--answer`.
 
 Exit codes: `0` shipped, `1` failed, `2` needs a human decision. The `/ship` Claude Code skill
 (`claude/skills/ship`) drives git-ship with these and asks you about the decisions.

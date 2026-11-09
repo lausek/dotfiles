@@ -21,12 +21,14 @@ VERSION = 1
 
 @dataclass(frozen=True)
 class Reviewed:
-    """The branch was reviewed up to `commit`, for `ticket`. Fixes of the review's findings count as reviewed."""
+    """The branch was reviewed up to `commit`, for `ticket` and with `context`. Fixes of the review's findings count
+    as reviewed."""
 
     commit: str
     ticket: str
     risk: Risk
     risk_rationale: str
+    context: str = ""
 
 
 class Memory:

@@ -93,3 +93,5 @@ class Change:
 
     diff_range: str
     ticket: Ticket | None
+    context: str = ""
+    """The author's notes for the review in their own words, e.g. what to focus on."""
