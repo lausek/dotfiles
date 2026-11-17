@@ -108,7 +108,7 @@ def ship_pipeline(run: Run, target: Target, clock: Clock = SYSTEM_CLOCK) -> Ship
 
 
 def _attempt(run: Run, target: Target, kept: list[Finding], conflicts_expected: bool, clock: Clock) -> Shipped:
-    if not merge_step(run):
+    if not merge_step(run, fetch=conflicts_expected):
         if conflicts_expected:
             raise ShipError(f"the PR reports merge conflicts, but origin/{run.base} merges cleanly here - check the PR yourself")
         run.ui.skip("merge", "no conflicts")
@@ -158,12 +158,16 @@ def check_key(index: int) -> str:
     return f"check:{index}"
 
 
-def merge_step(run: Run) -> bool:
+def merge_step(run: Run, fetch: bool) -> bool:
     """The PR's CI doesn't run while the branch conflicts with the base. If it does, the base is merged in
     and the agent resolves the conflicts. A clean merge is left to the host, the branch stays as it is.
-    Returns whether it merged."""
+    Returns whether it merged.
+
+    The base is fetched once when ship starts. `fetch` fetches it again, for when the PR reported conflicts:
+    the base moved since."""
     base = f"origin/{run.base}"
-    run.worktree("fetch", "-q", "origin", run.base)
+    if fetch:
+        run.worktree("fetch", "-q", "origin", run.base)
     conflicted = run.worktree.merge_conflicts(base)
     if not conflicted:
         return False

@@ -187,6 +187,7 @@ class PipelineTest(unittest.TestCase):
             resolve_checks=lambda: Detection(checks=list(checks), sources=[]),
             open_pr=open_pr or (lambda assessment: "url"),
         )
+        wt("fetch", "-q", "origin", "main")  # as ship does before the pipeline
         return ship_pipeline(self.make_run(wt, agent, decide, context), target, FakeClock())
 
     def test_auto_fixes_are_committed_and_only_the_fix_is_reviewed_again(self):
@@ -308,7 +309,7 @@ class PipelineTest(unittest.TestCase):
     def test_merge_step_leaves_a_branch_without_conflicts_alone(self):
         with worktree(self.repo) as wt:
             head = wt("rev-parse", "HEAD")
-            self.assertFalse(merge_step(self.make_run(wt, FakeAgent(wt.cwd, []))))
+            self.assertFalse(merge_step(self.make_run(wt, FakeAgent(wt.cwd, [])), fetch=True))
             self.assertEqual(wt("rev-parse", "HEAD"), head)
             self.assertTrue(wt.is_clean())
 
@@ -316,7 +317,7 @@ class PipelineTest(unittest.TestCase):
         self.diverge()
         with worktree(self.repo) as wt:
             agent = ResolvingAgent(wt.cwd, "both")
-            self.assertTrue(merge_step(self.make_run(wt, agent)))
+            self.assertTrue(merge_step(self.make_run(wt, agent), fetch=True))
             self.assertIn("- a\n", agent.fixes[0])
             self.assertEqual(wt.subjects("HEAD~1..HEAD"), ["chore: merge origin/main and resolve conflicts"])
             self.assertEqual(wt("rev-parse", "HEAD^2"), wt("rev-parse", "main"))
@@ -327,7 +328,7 @@ class PipelineTest(unittest.TestCase):
     def test_merge_step_commits_a_resolution_without_content_changes(self):
         self.diverge()
         with worktree(self.repo) as wt:
-            merge_step(self.make_run(wt, ResolvingAgent(wt.cwd, "ours")))
+            merge_step(self.make_run(wt, ResolvingAgent(wt.cwd, "ours")), fetch=True)
             self.assertEqual(wt("rev-parse", "HEAD^2"), wt("rev-parse", "main"))
 
     def test_merge_step_gives_up_on_leftover_markers(self):
@@ -336,10 +337,20 @@ class PipelineTest(unittest.TestCase):
             head = wt("rev-parse", "HEAD")
             agent = ResolvingAgent(wt.cwd, None)
             with self.assertRaisesRegex(ShipError, "still unresolved after 2 rounds: a"):
-                merge_step(self.make_run(wt, agent))
+                merge_step(self.make_run(wt, agent), fetch=True)
             self.assertEqual(len(agent.fixes), 3)
             self.assertEqual(wt("rev-parse", "HEAD"), head)
             self.assertTrue(wt.is_clean())
+
+    def test_merge_step_only_sees_a_moved_base_when_it_fetches(self):
+        with worktree(self.repo) as wt:
+            wt("fetch", "-q", "origin", "main")
+            (wt.cwd / "a").write_text("ours")
+            wt("commit", "-qam", "ours")
+            (self.repo.cwd / "a").write_text("theirs")
+            self.repo("commit", "-qam", "theirs")
+            self.assertFalse(merge_step(self.make_run(wt, ResolvingAgent(wt.cwd, "both")), fetch=False))
+            self.assertTrue(merge_step(self.make_run(wt, ResolvingAgent(wt.cwd, "both")), fetch=True))
 
     def test_merge_conflicts_fails_on_unknown_rev(self):
         with worktree(self.repo) as wt:
