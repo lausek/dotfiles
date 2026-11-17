@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .agent import Claude
@@ -22,10 +23,10 @@ from .git import Git, worktree
 from .hosts import Host, detect_host
 from .memory import Memory
 from .models import Assessment, Change, Check, Detection, Finding, Ticket
-from .pipeline import Answer, Decide, Run, Target, numbered, ship_pipeline
+from .pipeline import Answer, Decide, Run, Target, numbered, plan, ship_pipeline
 from .report import with_assessment
 from .shell import NeedsDecision, ShipError, run
-from .ui import PlainUi, Ui
+from .ui import PlainUi, PlannedStep, Ui
 
 
 def main() -> int:
@@ -117,47 +118,63 @@ def ship(
     remote_url = repo("remote", "get-url", "origin")
     host = detect_host(remote_url, repo.cwd)
 
-    repo("fetch", "-q", "origin", config.base)
-    merge_base = repo("merge-base", "HEAD", f"origin/{config.base}")
-    if not repo("rev-list", f"{merge_base}..HEAD"):
-        raise ShipError(f"no commits ahead of origin/{config.base}")
-
-    # Three dots: the diff from where the branch last met the base, so a merge of the base doesn't show up in it.
-    change = Change(
-        diff_range=f"origin/{config.base}...HEAD", ticket=_fetch_ticket(host, ticket_id), context=context
-    )
-
     memory = Memory(config_file.with_name("ship-state.json"), branch)
     memory.forget_other_branches(repo("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines())
 
-    with worktree(repo) as wt:
-        start = wt("rev-parse", "HEAD")
-        validation = Run(
-            worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide, base=config.base,
-            ui=ui, memory=memory,
-        )
-        target = Target(
-            branch=branch,
-            host=host,
-            ci_timeout=config.ci_timeout_minutes * 60,
-            resolve_checks=lambda: resolve_checks(config_file, wt.cwd, validation.agent, approve, redetect, ui),
-            open_pr=lambda assessment: open_pr(ui, host, validation, assessment, branch, config.base),
-        )
-        try:
-            with ui.session():
-                shipped = ship_pipeline(validation, target)
-        finally:
-            # Also when it fails or you abort it, so a rerun goes on from the fixes instead of redoing them.
-            # After the session, so it shows below the TUI's steps.
-            kept_fixes = keep_fixes(repo, branch, start, wt("rev-parse", "HEAD"))
+    # Where the worktree started and where ship got to in it, set once the worktree exists.
+    start: str | None = None
+    head: str | None = None
+    try:
+        # The steps show from the start, so the network calls of the preparation don't look like a hang.
+        with ui.session():
+            ui.plan([PlannedStep("prepare", "prepare", once=True), *plan(config.base, branch, checks=None)])
+            ui.start("prepare", "prepare")
+            change = prepare(ui, repo, host, config.base, ticket_id, context)
+            ui.status("create the worktree")
+            with worktree(repo) as wt:
+                start = wt("rev-parse", "HEAD")
+                ui.done("prepare")
+                validation = Run(
+                    worktree=wt, agent=Claude(wt.cwd), change=change, rounds=config.rounds, decide=decide,
+                    base=config.base, ui=ui, memory=memory,
+                )
+                target = Target(
+                    branch=branch,
+                    host=host,
+                    ci_timeout=config.ci_timeout_minutes * 60,
+                    resolve_checks=lambda: resolve_checks(config_file, wt.cwd, validation.agent, approve, redetect, ui),
+                    open_pr=lambda assessment: open_pr(ui, host, validation, assessment, branch, config.base),
+                )
+                try:
+                    shipped = ship_pipeline(validation, target)
+                finally:
+                    head = wt("rev-parse", "HEAD")
+    finally:
+        # Also when it fails or you abort it, so a rerun goes on from the fixes instead of redoing them.
+        # After the session, so it shows below the TUI's steps.
+        if start and head:
+            kept_fixes = keep_fixes(repo, branch, start, head)
             if kept_fixes:
                 print(f"\n{kept_fixes}")
 
-        if host is None:
-            print(f"unknown host for {remote_url} - pushed, open the PR yourself")
-        warning = untested_warning(shipped.detection, host, config, shipped.ci_checks)
-        if warning:
-            print(f"\nwarning: {warning}", file=sys.stderr)
+    if host is None:
+        print(f"unknown host for {remote_url} - pushed, open the PR yourself")
+    warning = untested_warning(shipped.detection, host, config, shipped.ci_checks)
+    if warning:
+        print(f"\nwarning: {warning}", file=sys.stderr)
+
+
+def prepare(ui: Ui, repo: Git, host: Host | None, base: str, ticket_id: str | None, context: str) -> Change:
+    """Fetches the base and the ticket. Both go over the network, so side by side."""
+    ui.status(f"fetch origin/{base}" + (f" and ticket #{ticket_id}" if ticket_id else ""))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        ticket = pool.submit(_fetch_ticket, host, ticket_id)
+        repo("fetch", "-q", "origin", base)
+        merge_base = repo("merge-base", "HEAD", f"origin/{base}")
+        if not repo("rev-list", f"{merge_base}..HEAD"):
+            raise ShipError(f"no commits ahead of origin/{base}")
+        # Three dots: the diff from where the branch last met the base, so a merge of the base doesn't show up in it.
+        return Change(diff_range=f"origin/{base}...HEAD", ticket=ticket.result(), context=context)
 
 
 def keep_fixes(repo: Git, branch: str, start: str, head: str) -> str | None:

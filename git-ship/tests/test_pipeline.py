@@ -594,6 +594,25 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(self.progress.attempt, "attempt 2/3 - fixed 1 review finding(s)")
         self.assertEqual([(step.note, step.details, step.started) for step in self.progress.steps], [("", [], None)] * 3)
 
+    def test_replanning_keeps_a_finished_step_where_it_was(self):
+        self.progress.plan([PlannedStep("prepare", "prepare", once=True), *self.planned()])
+        self.progress.start("prepare", "prepare")
+        self.progress.done("prepare")
+        self.progress.plan(self.planned())
+        self.assertEqual(
+            self.states(), [("prepare", "done"), ("review", "pending"), ("checks", "pending"), ("ci", "pending")]
+        )
+
+    def test_restart_drops_the_steps_that_run_once(self):
+        self.progress.plan([PlannedStep("prepare", "prepare", once=True), *self.planned()])
+        self.progress.done("prepare")
+        self.progress.start("review", "review")
+        self.progress.restart(2, 3, "fixed 1 review finding(s)")
+        self.assertEqual(self.states(), [("review", "pending"), ("checks", "pending"), ("ci", "pending")])
+
+    def planned(self) -> list[PlannedStep]:
+        return [PlannedStep("review", "review"), PlannedStep("checks", "checks"), PlannedStep("ci", "CI")]
+
     def test_details_belong_to_a_step_until_it_starts_again(self):
         self.progress.start("review", "review")
         self.progress.details("review", ["no findings"])

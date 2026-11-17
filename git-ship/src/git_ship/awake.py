@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -26,16 +27,20 @@ def stay_awake() -> Iterator[None]:
         stderr=subprocess.PIPE,
         text=True,
     )
-    try:
-        # systemd-inhibit only exits on its own if it could not take the lock.
-        lock.wait(timeout=1)
-        _warn(f"could not block sleep: {lock.stderr.read().strip() if lock.stderr else lock.returncode}")
-    except subprocess.TimeoutExpired:
-        pass
+    released = threading.Event()
 
+    def warn_if_lost() -> None:
+        # systemd-inhibit only exits on its own if it could not take the lock. Watched on the side, so
+        # shipping doesn't wait for it to take the lock.
+        lock.wait()
+        if not released.is_set():
+            _warn(f"could not block sleep: {lock.stderr.read().strip() if lock.stderr else lock.returncode}")
+
+    threading.Thread(target=warn_if_lost, daemon=True).start()
     try:
         yield
     finally:
+        released.set()
         lock.terminate()
         lock.wait()
 

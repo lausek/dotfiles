@@ -14,6 +14,8 @@ StepState = Literal["pending", "running", "done", "fixed", "skipped", "failed"]
 class PlannedStep:
     key: str
     title: str
+    once: bool = False
+    """Runs once before the pipeline, not again when it starts over, e.g. the preparation."""
 
 
 class Ui(Protocol):
@@ -89,6 +91,7 @@ class PlainUi:
 class Step:
     key: str
     title: str
+    once: bool = False
     state: StepState = "pending"
     note: str = ""
     details: list[str] = field(default_factory=list)
@@ -114,12 +117,14 @@ class Progress:
         known = {step.key: step for step in self.steps}
         steps = []
         for item in planned:
-            step = known.pop(item.key, None) or Step(item.key, item.title)
+            step = known.pop(item.key, None) or Step(item.key, item.title, item.once)
             if step.state == "pending":
                 step.title = item.title
             steps.append(step)
-        # Steps that already ran stay, even if the new plan doesn't have them.
-        steps += [step for step in known.values() if step.state != "pending"]
+        # Steps that already ran stay where they were, even if the new plan doesn't have them.
+        for index, step in enumerate(self.steps):
+            if step.key in known and step.state != "pending":
+                steps.insert(_after(steps, self.steps[:index]), step)
         self.steps = steps
 
     def start(self, key: str, title: str) -> None:
@@ -149,8 +154,9 @@ class Progress:
                     step.note = note
 
     def restart(self, attempt: int, attempts: int, reason: str) -> None:
-        """Every step is ahead again, in the same order."""
+        """Every step is ahead again, in the same order. Those that run only once are gone."""
         self.attempt = f"attempt {attempt}/{attempts} - {reason}"
+        self.steps = [step for step in self.steps if not step.once]
         for step in self.steps:
             step.state = "pending"
             step.note = ""
@@ -185,3 +191,12 @@ class Progress:
         step = Step(key, title)
         self.steps.append(step)
         return step
+
+
+def _after(steps: Sequence[Step], earlier: Sequence[Step]) -> int:
+    """The position right after the last of `earlier` that is in `steps`, the start if none is."""
+    keys = [step.key for step in steps]
+    for step in reversed(earlier):
+        if step.key in keys:
+            return keys.index(step.key) + 1
+    return 0
